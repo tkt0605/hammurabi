@@ -19,11 +19,13 @@ crate-type = ["cdylib", "rlib"]
 # --------------------------------------------------------------------------
 # `z3-backend` : Z3 SMT ソルバーを有効化（brew install z3 が必要）
 # `wasm`       : wasm-bindgen を有効化してブラウザ実行可能にする
+# `ai`         : OpenAI / Anthropic API クライアントを有効化
 # --------------------------------------------------------------------------
 [features]
 default    = []
 z3-backend = ["z3"]
 wasm       = ["wasm-bindgen", "console_error_panic_hook"]
+ai         = ["dep:ureq"]
 
 [dependencies]
 thiserror  = "1"
@@ -35,6 +37,10 @@ hex        = "0.4.3"
 
 wasm-bindgen            = { version = "0.2",  optional = true }
 console_error_panic_hook = { version = "0.1", optional = true }
+lsp-server = "0.7"
+lsp-types = "0.97"
+anyhow = "1.0.102"
+ureq = { version = "3.2.0", features = ["json"], optional = true }
 
 [dependencies.z3]
 version  = "0.12"
