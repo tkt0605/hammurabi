@@ -6,19 +6,35 @@ description = "A logic-first AI-native language where correctness is proven, not
 authors     = ["Hammurabi Language Team"]
 
 # --------------------------------------------------------------------------
+# ライブラリターゲット
+# --------------------------------------------------------------------------
+# cdylib: wasm-pack が WASM バイナリをビルドするために必要
+# rlib  : cargo test・通常の Rust クレートとして使うために必要
+# --------------------------------------------------------------------------
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+# --------------------------------------------------------------------------
 # Features
 # --------------------------------------------------------------------------
-# `z3-backend`: リンク z3 システムライブラリを有効化し、本物の SMT 証明エンジンを使用する。
-#               `brew install z3` 等でシステムに z3 が必要。
-#               デフォルトは MockVerifier（証明インターフェースの忠実な Stub）。
+# `z3-backend` : Z3 SMT ソルバーを有効化（brew install z3 が必要）
+# `wasm`       : wasm-bindgen を有効化してブラウザ実行可能にする
 # --------------------------------------------------------------------------
 [features]
 default    = []
 z3-backend = ["z3"]
+wasm       = ["wasm-bindgen", "console_error_panic_hook"]
 
 [dependencies]
-thiserror = "1"
-sha2      = "0.10"
+thiserror  = "1"
+sha2       = "0.10"
+serde      = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+hmac       = "0.12"
+hex        = "0.4.3"
+
+wasm-bindgen            = { version = "0.2",  optional = true }
+console_error_panic_hook = { version = "0.1", optional = true }
 
 [dependencies.z3]
 version  = "0.12"

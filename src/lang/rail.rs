@@ -12,6 +12,7 @@
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::collections::hash_map::DefaultHasher;
+use serde::{Deserialize, Serialize};
 use crate::lang::goal::Predicate;
 use crate::compiler::verifier::{Verifier, VerificationError};
 
@@ -21,7 +22,7 @@ use crate::compiler::verifier::{Verifier, VerificationError};
 
 /// Z3 による検証が完了したことを証明するトークン。
 /// `pub(crate)` なコンストラクタにより、`verifier` モジュール外では生成不可。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProofToken {
     /// 検証された制約セットの SHA-2 ハッシュ（改竄検知）
     pub(crate) constraint_hash: u64,
@@ -29,7 +30,7 @@ pub struct ProofToken {
     pub(crate) backend: VerifierBackend,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum VerifierBackend {
     /// 本番: z3 SMT ソルバーによる厳密証明
     Z3Smt,
@@ -60,7 +61,7 @@ impl fmt::Display for ProofToken {
 // ---------------------------------------------------------------------------
 
 /// 値に課せられる制約。`Predicate` AST の具体化。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Constraint {
     /// 述語 AST による任意の制約
     Predicate(Predicate),

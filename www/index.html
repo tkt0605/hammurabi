@@ -1,0 +1,574 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Hammurabi — Logic-First Playground</title>
+  <style>
+    :root {
+      --bg:        #0d1117;
+      --surface:   #161b22;
+      --border:    #30363d;
+      --accent:    #f78166;
+      --accent2:   #79c0ff;
+      --accent3:   #56d364;
+      --text:      #e6edf3;
+      --muted:     #8b949e;
+      --code-bg:   #0d1117;
+      --radius:    8px;
+    }
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+    }
+
+    /* ── ヘッダー ── */
+    header {
+      border-bottom: 1px solid var(--border);
+      padding: 16px 32px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    header h1 { font-size: 1.1rem; font-weight: 600; }
+    header .badge {
+      font-size: 0.7rem;
+      background: var(--accent);
+      color: #000;
+      padding: 2px 8px;
+      border-radius: 99px;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+    }
+    header .sub { color: var(--muted); font-size: 0.85rem; margin-left: auto; }
+
+    /* ── メインレイアウト ── */
+    main {
+      display: grid;
+      grid-template-columns: 400px 1fr;
+      height: calc(100vh - 57px);
+    }
+
+    /* ── 左パネル ── */
+    .panel-left {
+      border-right: 1px solid var(--border);
+      overflow-y: auto;
+      padding: 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+
+    .section-title {
+      font-size: 0.75rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted);
+      margin-bottom: 8px;
+    }
+
+    .form-group { display: flex; flex-direction: column; gap: 6px; }
+    label { font-size: 0.85rem; color: var(--muted); }
+
+    input, select, textarea {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      color: var(--text);
+      padding: 8px 12px;
+      font-size: 0.9rem;
+      font-family: inherit;
+      outline: none;
+      transition: border-color 0.15s;
+    }
+    input:focus, select:focus, textarea:focus {
+      border-color: var(--accent2);
+    }
+
+    .add-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr auto;
+      gap: 8px;
+      align-items: end;
+    }
+    .add-row.triple { grid-template-columns: 1fr 80px 80px auto; }
+
+    button {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      color: var(--text);
+      padding: 8px 14px;
+      font-size: 0.85rem;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: border-color 0.15s, background 0.15s;
+    }
+    button:hover { border-color: var(--accent2); background: #21262d; }
+
+    .btn-primary {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #000;
+      font-weight: 700;
+      padding: 10px 20px;
+      font-size: 0.95rem;
+      width: 100%;
+    }
+    .btn-primary:hover { background: #ff8a75; border-color: #ff8a75; }
+    .btn-primary:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    .tag-list { display: flex; flex-wrap: wrap; gap: 6px; min-height: 28px; }
+    .tag {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      background: #21262d;
+      border: 1px solid var(--border);
+      border-radius: 99px;
+      padding: 3px 10px;
+      font-size: 0.8rem;
+      font-family: "Fira Code", "Cascadia Code", monospace;
+    }
+    .tag .del {
+      cursor: pointer;
+      color: var(--muted);
+      font-size: 0.75rem;
+      background: none;
+      border: none;
+      padding: 0;
+      line-height: 1;
+    }
+    .tag .del:hover { color: var(--accent); border: none; background: none; }
+
+    /* ── 右パネル ── */
+    .panel-right {
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .tab-bar {
+      display: flex;
+      border-bottom: 1px solid var(--border);
+      padding: 0 24px;
+    }
+    .tab {
+      padding: 12px 16px;
+      font-size: 0.85rem;
+      color: var(--muted);
+      cursor: pointer;
+      border-bottom: 2px solid transparent;
+      margin-bottom: -1px;
+      transition: color 0.15s;
+    }
+    .tab.active { color: var(--text); border-bottom-color: var(--accent); }
+
+    .tab-content { flex: 1; overflow: hidden; display: none; }
+    .tab-content.active { display: flex; flex-direction: column; }
+
+    .output-header {
+      padding: 12px 24px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .output-header span { font-size: 0.8rem; color: var(--muted); font-family: monospace; }
+    .copy-btn {
+      font-size: 0.75rem;
+      padding: 4px 10px;
+    }
+
+    pre {
+      flex: 1;
+      overflow: auto;
+      padding: 24px;
+      margin: 0;
+      background: var(--code-bg);
+      font-family: "Fira Code", "Cascadia Code", "SF Mono", Menlo, monospace;
+      font-size: 0.83rem;
+      line-height: 1.6;
+      color: var(--text);
+      white-space: pre;
+    }
+
+    /* シンタックスカラー（簡易） */
+    .kw   { color: #ff7b72; }
+    .fn_  { color: #d2a8ff; }
+    .str_ { color: #a5d6ff; }
+    .cmt  { color: #8b949e; font-style: italic; }
+    .num  { color: #79c0ff; }
+    .mac  { color: #ffa657; }
+
+    .status-bar {
+      padding: 6px 24px;
+      background: var(--surface);
+      border-top: 1px solid var(--border);
+      font-size: 0.75rem;
+      color: var(--muted);
+      display: flex;
+      gap: 16px;
+    }
+    .status-ok  { color: var(--accent3); }
+    .status-err { color: var(--accent); }
+
+    /* JSON view */
+    .json-view { padding: 24px; font-family: monospace; font-size: 0.85rem; line-height: 1.7; overflow: auto; flex: 1; }
+    .j-key   { color: var(--accent2); }
+    .j-str   { color: #a5d6ff; }
+    .j-num   { color: #79c0ff; }
+    .j-bool  { color: #ffa657; }
+    .j-null  { color: var(--muted); }
+
+    .loading { color: var(--muted); padding: 24px; font-style: italic; }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>⚖ Hammurabi</h1>
+  <span class="badge">WASM</span>
+  <span class="sub">Logic-First Playground — ContractualGoal → Rust Code</span>
+</header>
+
+<main>
+  <!-- ── 左: フォーム ── -->
+  <div class="panel-left">
+
+    <!-- 関数名 -->
+    <div>
+      <div class="section-title">Function Name</div>
+      <div class="form-group">
+        <input id="fn-name" type="text" placeholder="safe_division" value="safe_division" />
+      </div>
+    </div>
+
+    <!-- Preconditions -->
+    <div>
+      <div class="section-title">Preconditions <span style="color:var(--accent2)">require</span></div>
+
+      <div class="add-row" style="margin-bottom:8px">
+        <select id="pre-type">
+          <option value="atom">Atom</option>
+          <option value="non_null">NonNull</option>
+          <option value="in_range">InRange</option>
+        </select>
+        <input id="pre-var" type="text" placeholder="var / pred name" />
+        <button onclick="addPrecondition()">+ Add</button>
+      </div>
+
+      <div id="pre-range" style="display:none; margin-bottom:8px; gap:8px; display:none" class="add-row triple">
+        <span style="font-size:0.8rem;color:var(--muted);align-self:center">range:</span>
+        <input id="pre-min" type="number" placeholder="min" value="1" />
+        <input id="pre-max" type="number" placeholder="max" value="1000000" />
+      </div>
+
+      <div class="tag-list" id="pre-list"></div>
+    </div>
+
+    <!-- Postconditions -->
+    <div>
+      <div class="section-title">Postconditions <span style="color:var(--accent3)">ensure</span></div>
+      <div class="add-row" style="margin-bottom:8px">
+        <input id="post-name" type="text" placeholder="result_is_finite" />
+        <button onclick="addPostcondition()">+ Add</button>
+      </div>
+      <div class="tag-list" id="post-list"></div>
+    </div>
+
+    <!-- Invariants -->
+    <div>
+      <div class="section-title">Invariants</div>
+      <div class="add-row" style="margin-bottom:8px">
+        <input id="inv-name" type="text" placeholder="no_memory_aliasing" />
+        <button onclick="addInvariant()">+ Add</button>
+      </div>
+      <div class="tag-list" id="inv-list"></div>
+    </div>
+
+    <!-- Forbidden Patterns -->
+    <div>
+      <div class="section-title">Forbidden Patterns</div>
+      <div class="add-row" style="margin-bottom:8px">
+        <select id="fp-type">
+          <option value="NonExhaustiveBranch">NonExhaustiveBranch</option>
+          <option value="RuntimeNullCheck">RuntimeNullCheck</option>
+          <option value="UnprovenUnwrap">UnprovenUnwrap</option>
+          <option value="ImplicitCoercion">ImplicitCoercion</option>
+          <option value="CatchAllSuppression">CatchAllSuppression</option>
+        </select>
+        <button onclick="addForbidden()">+ Add</button>
+      </div>
+      <div class="tag-list" id="fp-list"></div>
+    </div>
+
+    <!-- 生成ボタン -->
+    <button class="btn-primary" id="gen-btn" onclick="generate()" disabled>
+      Loading WASM…
+    </button>
+
+  </div>
+
+  <!-- ── 右: 出力 ── -->
+  <div class="panel-right">
+    <div class="tab-bar">
+      <div class="tab active" onclick="switchTab('code')">Rust Code</div>
+      <div class="tab" onclick="switchTab('verify')">Verify Report</div>
+      <div class="tab" onclick="switchTab('json')">Goal JSON</div>
+    </div>
+
+    <div class="tab-content active" id="tab-code">
+      <div class="output-header">
+        <span id="code-filename">safe_division.rs</span>
+        <button class="copy-btn" onclick="copyCode()">Copy</button>
+      </div>
+      <pre id="code-output"><span class="cmt">// ContractualGoal を入力して「Generate」を押してください</span></pre>
+    </div>
+
+    <div class="tab-content" id="tab-verify">
+      <div class="json-view" id="verify-output">
+        <span style="color:var(--muted)">Generate を実行すると検証レポートが表示されます。</span>
+      </div>
+    </div>
+
+    <div class="tab-content" id="tab-json">
+      <div class="output-header">
+        <span>ContractualGoal (JSON)</span>
+        <button class="copy-btn" onclick="copyJson()">Copy</button>
+      </div>
+      <pre id="json-output"><span class="cmt">// Generate を実行すると ContractualGoal の JSON が表示されます</span></pre>
+    </div>
+
+    <div class="status-bar">
+      <span id="status-wasm">⏳ WASM loading…</span>
+      <span id="status-info"></span>
+    </div>
+  </div>
+</main>
+
+<script type="module">
+  import init, {
+    WasmGoalBuilder,
+    generate_code_from_json,
+    verify_goal_from_json,
+    version,
+  } from './pkg/hammurabi.js';
+
+  // ── 状態 ────────────────────────────────────────────────────────────────
+  const state = {
+    preconditions: [],   // { type, var, min?, max? }
+    postconditions: [],  // string (atom name)
+    invariants: [],      // string
+    forbidden: [],       // string
+  };
+
+  let wasmReady = false;
+
+  // ── WASM 初期化 ──────────────────────────────────────────────────────────
+  await init();
+  wasmReady = true;
+  document.getElementById('status-wasm').innerHTML =
+    `<span class="status-ok">✓ WASM v${version()} ready</span>`;
+  document.getElementById('gen-btn').disabled = false;
+  document.getElementById('gen-btn').textContent = '⚡ Generate';
+
+  // ── グローバルに公開 ─────────────────────────────────────────────────────
+  window._wasm = { WasmGoalBuilder, generate_code_from_json, verify_goal_from_json };
+
+  // ── InRange 入力フォームの表示切り替え ──────────────────────────────────
+  document.getElementById('pre-type').addEventListener('change', (e) => {
+    const rangeRow = document.getElementById('pre-range');
+    rangeRow.style.display = e.target.value === 'in_range' ? 'flex' : 'none';
+  });
+
+  // ── タグ一覧の再描画 ─────────────────────────────────────────────────────
+  window.renderTags = (listId, items, onDel) => {
+    const el = document.getElementById(listId);
+    el.innerHTML = items.map((item, i) =>
+      `<div class="tag">${item.label}
+        <button class="del" onclick="${onDel}(${i})">✕</button>
+      </div>`
+    ).join('');
+  };
+
+  // ── Precondition ────────────────────────────────────────────────────────
+  window.addPrecondition = () => {
+    const type = document.getElementById('pre-type').value;
+    const varName = document.getElementById('pre-var').value.trim();
+    if (!varName) return;
+
+    let label;
+    if (type === 'atom')     label = varName;
+    else if (type === 'non_null') label = `NonNull(${varName})`;
+    else {
+      const min = document.getElementById('pre-min').value;
+      const max = document.getElementById('pre-max').value;
+      label = `${min} ≤ ${varName} ≤ ${max}`;
+      state.preconditions.push({ type, var: varName, min: +min, max: +max, label });
+      renderPreList();
+      return;
+    }
+    state.preconditions.push({ type, var: varName, label });
+    renderPreList();
+  };
+  window.delPre = (i) => { state.preconditions.splice(i, 1); renderPreList(); };
+  window.renderPreList = () => renderTags('pre-list', state.preconditions, 'delPre');
+
+  // ── Postcondition ────────────────────────────────────────────────────────
+  window.addPostcondition = () => {
+    const name = document.getElementById('post-name').value.trim();
+    if (!name) return;
+    state.postconditions.push({ label: name, value: name });
+    renderPostList();
+  };
+  window.delPost = (i) => { state.postconditions.splice(i, 1); renderPostList(); };
+  window.renderPostList = () => renderTags('post-list', state.postconditions, 'delPost');
+
+  // ── Invariant ────────────────────────────────────────────────────────────
+  window.addInvariant = () => {
+    const name = document.getElementById('inv-name').value.trim();
+    if (!name) return;
+    state.invariants.push({ label: name, value: name });
+    renderInvList();
+  };
+  window.delInv = (i) => { state.invariants.splice(i, 1); renderInvList(); };
+  window.renderInvList = () => renderTags('inv-list', state.invariants, 'delInv');
+
+  // ── Forbidden ────────────────────────────────────────────────────────────
+  window.addForbidden = () => {
+    const fp = document.getElementById('fp-type').value;
+    if (state.forbidden.find(f => f.value === fp)) return;
+    state.forbidden.push({ label: fp, value: fp });
+    renderFpList();
+  };
+  window.delFp = (i) => { state.forbidden.splice(i, 1); renderFpList(); };
+  window.renderFpList = () => renderTags('fp-list', state.forbidden, 'delFp');
+
+  // ── コード生成 ───────────────────────────────────────────────────────────
+  window.generate = () => {
+    if (!wasmReady) return;
+    const name = document.getElementById('fn-name').value.trim() || 'my_function';
+    const builder = new WasmGoalBuilder(name);
+
+    for (const p of state.preconditions) {
+      if (p.type === 'atom')     builder.require_atom(p.var);
+      else if (p.type === 'non_null') builder.require_non_null(p.var);
+      else builder.require_in_range(p.var, p.min, p.max);
+    }
+    for (const p of state.postconditions) builder.ensure_atom(p.value);
+    for (const p of state.invariants)     builder.add_invariant(p.value);
+    for (const p of state.forbidden)      builder.forbid(p.value);
+
+    const code   = builder.generate_code();
+    const report = JSON.parse(builder.verify());
+    const json   = builder.to_json();
+
+    // コード表示
+    document.getElementById('code-output').innerHTML = syntaxHighlight(code);
+    document.getElementById('code-filename').textContent = `${toSnakeCase(name)}.rs`;
+
+    // 検証レポート
+    document.getElementById('verify-output').innerHTML = renderReport(report);
+
+    // JSON
+    document.getElementById('json-output').innerHTML = syntaxHighlightJson(json);
+
+    // ステータス
+    const info = `${state.preconditions.length} pre | ${state.postconditions.length} post | ${state.invariants.length} inv`;
+    document.getElementById('status-info').textContent = info;
+  };
+
+  // ── タブ切り替え ────────────────────────────────────────────────────────
+  window.switchTab = (id) => {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.tab')[['code','verify','json'].indexOf(id)].classList.add('active');
+    document.getElementById(`tab-${id}`).classList.add('active');
+  };
+
+  // ── コピー ───────────────────────────────────────────────────────────────
+  window.copyCode = () => {
+    navigator.clipboard.writeText(
+      document.getElementById('code-output').innerText
+    );
+  };
+  window.copyJson = () => {
+    navigator.clipboard.writeText(
+      document.getElementById('json-output').innerText
+    );
+  };
+
+  // ── 検証レポート描画 ─────────────────────────────────────────────────────
+  function renderReport(r) {
+    if (!r.ok && r.error) {
+      return `<span class="status-err">✗ ${r.error}</span>`;
+    }
+    const check = v => v
+      ? '<span class="status-ok">✓</span>'
+      : '<span class="status-err">✗</span>';
+    return `
+      <table style="border-collapse:collapse;width:100%">
+        <tr><td style="padding:6px 0;color:var(--muted);width:160px">Goal</td>
+            <td><code style="color:var(--accent2)">${r.goal_name}</code></td></tr>
+        <tr><td style="padding:6px 0;color:var(--muted)">Compliant</td>
+            <td>${check(r.compliant)} ${r.compliant ? 'COMPLIANT' : 'VIOLATION'}</td></tr>
+        <tr><td style="padding:6px 0;color:var(--muted)">Exhaustive</td>
+            <td>${check(r.exhaustive)}</td></tr>
+        <tr><td style="padding:6px 0;color:var(--muted)">Null Safety</td>
+            <td>${check(r.null_safety)}</td></tr>
+        <tr><td style="padding:6px 0;color:var(--muted)">Backend</td>
+            <td><code>${r.backend ?? 'Mock'}</code></td></tr>
+      </table>
+      ${r.violations?.length ? `
+        <div style="margin-top:12px;color:var(--accent)">Violations:</div>
+        <ul style="margin-top:4px;padding-left:16px">
+          ${r.violations.map(v => `<li style="color:var(--accent);font-size:0.85rem">${v}</li>`).join('')}
+        </ul>` : ''}
+    `;
+  }
+
+  // ── 簡易シンタックスハイライト（Rust） ──────────────────────────────────
+  function syntaxHighlight(code) {
+    return code
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/(\/\/[^\n]*)/g, '<span class="cmt">$1</span>')
+      .replace(/\b(pub|fn|let|mut|use|mod|impl|where|struct|enum|return|Ok|Err|Result|Vec|String|todo|true|false)\b/g, '<span class="kw">$1</span>')
+      .replace(/"([^"]*)"/g, '<span class="str_">"$1"</span>')
+      .replace(/\b(\d+_i64|\d+_u64|\d+)\b/g, '<span class="num">$1</span>')
+      .replace(/\b(todo!|vec!|format!|println!|assert!)/g, '<span class="mac">$1</span>');
+  }
+
+  function syntaxHighlightJson(json) {
+    return json
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"([^"]+)":/g, '<span class="j-key">"$1"</span>:')
+      .replace(/: "([^"]*)"/g, ': <span class="j-str">"$1"</span>')
+      .replace(/: (-?\d+)/g, ': <span class="j-num">$1</span>')
+      .replace(/: (true|false)/g, ': <span class="j-bool">$1</span>')
+      .replace(/: null/g, ': <span class="j-null">null</span>');
+  }
+
+  function toSnakeCase(s) {
+    return s.replace(/([A-Z])/g, '_$1').replace(/[\s-]+/g, '_').toLowerCase().replace(/^_/, '');
+  }
+
+  // ── デフォルト値をセット ─────────────────────────────────────────────────
+  state.preconditions.push({ type: 'non_null', var: 'divisor', label: 'NonNull(divisor)' });
+  state.preconditions.push({ type: 'in_range', var: 'divisor', min: 1, max: 9007199254740991, label: '1 ≤ divisor ≤ MAX' });
+  state.postconditions.push({ label: 'result_is_finite', value: 'result_is_finite' });
+  state.invariants.push({ label: 'no_memory_aliasing', value: 'no_memory_aliasing' });
+  renderPreList();
+  renderPostList();
+  renderInvList();
+  renderFpList();
+</script>
+
+</body>
+</html>

@@ -4,6 +4,7 @@
 //! これが hammurabi の「The What Interface」を実現する核心データ構造。
 
 use std::fmt;
+use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
 // Predicate — 一階述語論理の AST
@@ -11,7 +12,7 @@ use std::fmt;
 
 /// 述語論理を表す再帰的な AST ノード。
 /// `if` 文の代わりにこの木構造でロジックの全分岐を記述する。
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Predicate {
     /// 恒真
     True,
@@ -93,7 +94,7 @@ impl fmt::Display for Predicate {
 
 /// コンパイラが検出・拒絶するべきパターン群。
 /// if 文の場当たり的な例外処理、未網羅な分岐などが対象。
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ForbiddenPattern {
     /// 網羅されていない分岐（全パターンが型レベルで証明されていないマッチ）
     NonExhaustiveBranch,
@@ -133,7 +134,7 @@ impl fmt::Display for ForbiddenPattern {
 /// - `postconditions`: 実装が保証しなければならない出力の性質  
 /// - `invariants`    : 実行中ずっと成立しなければならない不変条件
 /// - `forbidden`     : AIが生成したコードに含んではならないパターン
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContractualGoal {
     pub name:           String,
     pub preconditions:  Vec<Predicate>,
