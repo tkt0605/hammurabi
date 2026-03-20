@@ -1,0 +1,27 @@
+[package]
+name        = "hammurabi"
+version     = "0.1.0"
+edition     = "2021"
+description = "A logic-first AI-native language where correctness is proven, not tested"
+authors     = ["Hammurabi Language Team"]
+
+# --------------------------------------------------------------------------
+# Features
+# --------------------------------------------------------------------------
+# `z3-backend`: リンク z3 システムライブラリを有効化し、本物の SMT 証明エンジンを使用する。
+#               `brew install z3` 等でシステムに z3 が必要。
+#               デフォルトは MockVerifier（証明インターフェースの忠実な Stub）。
+# --------------------------------------------------------------------------
+[features]
+default    = []
+z3-backend = ["z3"]
+
+[dependencies]
+thiserror = "1"
+sha2      = "0.10"
+
+[dependencies.z3]
+version  = "0.12"
+optional = true
+
+[dev-dependencies]
