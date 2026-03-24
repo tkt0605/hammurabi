@@ -1,2 +1,7 @@
 [tools]
 rust = "latest"
+
+[env]
+# z3-sys (bindgen) が Homebrew の z3 ヘッダー・ライブラリを見つけられるようにする
+CPATH        = "/opt/homebrew/include"
+LIBRARY_PATH = "/opt/homebrew/lib"

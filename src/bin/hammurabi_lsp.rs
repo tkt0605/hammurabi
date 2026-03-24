@@ -191,7 +191,7 @@ fn handle_notification(
 // ---------------------------------------------------------------------------
 
 fn validate(text: &str) -> Vec<Diagnostic> {
-    let ParseResult { goals, errors } = parse_hb(text);
+    let ParseResult { goals, errors, .. } = parse_hb(text);
     let mut diags: Vec<Diagnostic> = Vec::new();
 
     // パースエラー → Error

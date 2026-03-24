@@ -10,6 +10,7 @@
 //! - `merge` は2本のレールを合成し、組み合わせ不変条件を再証明する
 
 use std::fmt;
+use std::any::Any;
 use std::hash::{Hash, Hasher};
 use std::collections::hash_map::DefaultHasher;
 use serde::{Deserialize, Serialize};
@@ -103,13 +104,14 @@ pub fn hash_constraints(constraints: &[Constraint]) -> u64 {
 /// 意味論的な制約を封印した値コンテナ。
 ///
 /// # 型パラメータ
-/// `T`: コンテナが保持する値の型。`Send + Sync` を要求することで
-///      M5 Pro の Unified Memory 上でのスレッド安全性を型レベルで保証する。
+/// `T`: コンテナが保持する値の型。
+/// - `Send + Sync`: M5 Pro Unified Memory 上のスレッド安全性を型レベルで保証
+/// - `Any`（= `'static`）: Verifier が値を具体型にダウンキャストして値レベル検証を行える
 ///
 /// # 不変条件
 /// - `proof` は `constraints` と同一のハッシュを持つ（改竄検知）
 /// - `value` への可変アクセスは存在しない（不変条件の破壊を防ぐ）
-pub struct LogicRail<T: Send + Sync> {
+pub struct LogicRail<T: Send + Sync + Any> {
     value:       T,
     constraints: Vec<Constraint>,
     proof:       ProofToken,
@@ -117,7 +119,7 @@ pub struct LogicRail<T: Send + Sync> {
     id:          String,
 }
 
-impl<T: Send + Sync + fmt::Debug> LogicRail<T> {
+impl<T: Send + Sync + Any + fmt::Debug> LogicRail<T> {
     // -----------------------------------------------------------------------
     // 構築
     // -----------------------------------------------------------------------
@@ -177,7 +179,7 @@ impl<T: Send + Sync + fmt::Debug> LogicRail<T> {
     // -----------------------------------------------------------------------
 
     /// `T → U` の変換を適用しつつ、新しい制約セットで再証明する。
-    /// 変換後の型 `U` にも `Send + Sync` を要求し、メモリ安全性を保持する。
+    /// 変換後の型 `U` にも `Send + Sync + Any` を要求し、メモリ安全性と値検証を保持する。
     pub fn map<U, F, V>(
         self,
         new_id:          impl Into<String>,
@@ -186,7 +188,7 @@ impl<T: Send + Sync + fmt::Debug> LogicRail<T> {
         verifier:        &V,
     ) -> Result<LogicRail<U>, VerificationError>
     where
-        U: Send + Sync + fmt::Debug,
+        U: Send + Sync + Any + fmt::Debug,
         F: FnOnce(T) -> U,
         V: Verifier,
     {
@@ -204,7 +206,7 @@ impl<T: Send + Sync + fmt::Debug> LogicRail<T> {
         verifier:             &V,
     ) -> Result<LogicRail<(T, U)>, VerificationError>
     where
-        U: Send + Sync + fmt::Debug,
+        U: Send + Sync + Any + fmt::Debug,
         V: Verifier,
     {
         let merged_value = (self.value, other.value);
@@ -212,7 +214,7 @@ impl<T: Send + Sync + fmt::Debug> LogicRail<T> {
     }
 }
 
-impl<T: Send + Sync + fmt::Debug> fmt::Display for LogicRail<T> {
+impl<T: Send + Sync + Any + fmt::Debug> fmt::Display for LogicRail<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "LogicRail[{}]", self.id)?;
         writeln!(f, "  value  : {:?}", self.value)?;

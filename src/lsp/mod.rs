@@ -18,6 +18,7 @@
 //! 1 ファイルに複数の `goal` ブロックを記述できる。
 
 use crate::lang::goal::{ContractualGoal, ForbiddenPattern, Predicate};
+use crate::codegen::TargetLang;
 
 // ---------------------------------------------------------------------------
 // Span — LSP のゼロ起算行・列
@@ -98,6 +99,8 @@ pub struct ParseError {
 pub struct ParseResult {
     pub goals:  Vec<ParsedGoal>,
     pub errors: Vec<ParseError>,
+    /// ファイル先頭の `lang <language>` 行で指定された出力言語（省略時は Rust）
+    pub lang:   TargetLang,
 }
 
 // ---------------------------------------------------------------------------
@@ -107,9 +110,10 @@ pub struct ParseResult {
 /// `.hb` テキストを解析し、`ParseResult` を返す。
 /// エラーが含まれていても可能な限りパースを継続する（寛容なパーサ）。
 pub fn parse_hb(text: &str) -> ParseResult {
-    let mut goals:  Vec<ParsedGoal> = Vec::new();
-    let mut errors: Vec<ParseError> = Vec::new();
+    let mut goals:   Vec<ParsedGoal>    = Vec::new();
+    let mut errors:  Vec<ParseError>    = Vec::new();
     let mut current: Option<ParsedGoal> = None;
+    let mut file_lang: TargetLang       = TargetLang::Rust;
 
     for (line_idx, raw_line) in text.lines().enumerate() {
         let line_no = line_idx as u32;
@@ -128,6 +132,19 @@ pub fn parse_hb(text: &str) -> ParseResult {
         let kw_lower = keyword.to_lowercase();
 
         match kw_lower.as_str() {
+            "lang" => {
+                // ファイルレベルの言語指定: `lang python`
+                let lang_str = rest.split_whitespace().next().unwrap_or(rest);
+                match lang_str.parse::<TargetLang>() {
+                    Ok(l)  => file_lang = l,
+                    Err(e) => errors.push(ParseError {
+                        span:     Span::whole_line(line_no, trimmed.len() as u32),
+                        message:  format!("lang 指定エラー: {e}"),
+                        severity: ErrorSeverity::Error,
+                    }),
+                }
+            }
+
             "goal" => {
                 // 前のゴールを確定
                 if let Some(g) = current.take() { goals.push(g); }
@@ -246,7 +263,7 @@ pub fn parse_hb(text: &str) -> ParseResult {
     }
 
     if let Some(g) = current { goals.push(g); }
-    ParseResult { goals, errors }
+    ParseResult { goals, errors, lang: file_lang }
 }
 
 // ---------------------------------------------------------------------------

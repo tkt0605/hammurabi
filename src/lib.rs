@@ -12,8 +12,8 @@ pub mod ai_gen;
 pub mod codegen;
 pub mod compiler;
 pub mod lang;
-pub mod lsp;
 pub mod math;
+pub mod lsp;
 pub mod proof_store;
 
 #[cfg(feature = "wasm")]

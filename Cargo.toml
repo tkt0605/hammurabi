@@ -43,7 +43,7 @@ anyhow = "1.0.102"
 ureq = { version = "3.2.0", features = ["json"], optional = true }
 
 [dependencies.z3]
-version  = "0.12"
+version  = "0.19"
 optional = true
 
 [dev-dependencies]

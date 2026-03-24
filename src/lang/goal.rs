@@ -60,6 +60,9 @@ impl Predicate {
     pub fn for_all(var: impl Into<String>, body: Predicate) -> Self {
         Self::ForAll { var: var.into(), body: Box::new(body) }
     }
+    pub fn exists(var: impl Into<String>, body: Predicate) -> Self {
+        Self::Exists { var: var.into(), body: Box::new(body) }
+    }
     pub fn in_range(var: impl Into<String>, min: i64, max: i64) -> Self {
         Self::InRange { var: var.into(), min, max }
     }
