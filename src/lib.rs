@@ -11,6 +11,7 @@
 pub mod ai_gen;
 pub mod codegen;
 pub mod compiler;
+pub mod config;
 pub mod lang;
 pub mod math;
 pub mod lsp;

@@ -5,20 +5,26 @@
 //! ## `.hb` ファイルフォーマット
 //! ```text
 //! // コメント
+//! agent   openai                   // AI エージェント (openai|anthropic|mock)
+//! api_key sk-proj-xxx              // API キー（⚠ .gitignore 推奨）
+//! model   gpt-4o                   // モデル名
+//! lang    rust                     // 出力言語
+//!
 //! goal safe_division
 //! require NonNull(divisor)
 //! require InRange(divisor, 1, 9223372036854775807)
-//! require dividend_is_integer
 //! ensure  result_is_finite
 //! invariant no_memory_aliasing
 //! forbid RuntimeNullCheck
 //! forbid UnprovenUnwrap
 //! ```
 //!
+//! ファイル先頭の `agent` / `api_key` / `model` / `lang` はファイル全体に適用される。
 //! 1 ファイルに複数の `goal` ブロックを記述できる。
 
 use crate::lang::goal::{ContractualGoal, ForbiddenPattern, Predicate};
 use crate::codegen::TargetLang;
+use crate::config::AgentKind;
 
 // ---------------------------------------------------------------------------
 // Span — LSP のゼロ起算行・列
@@ -99,8 +105,16 @@ pub struct ParseError {
 pub struct ParseResult {
     pub goals:  Vec<ParsedGoal>,
     pub errors: Vec<ParseError>,
-    /// ファイル先頭の `lang <language>` 行で指定された出力言語（省略時は Rust）
-    pub lang:   TargetLang,
+    /// `lang <language>` で指定された出力言語（省略時は Rust）
+    pub lang:    TargetLang,
+    /// `agent <name>` で指定された AI エージェント（省略時は None）
+    pub agent:   Option<AgentKind>,
+    /// `api_key <key>` で指定された API キー（省略時は None）
+    ///
+    /// ⚠ API キーをリポジトリに含めないよう `.gitignore` に `.hb` ファイルを追加してください。
+    pub api_key: Option<String>,
+    /// `model <name>` で指定されたモデル名（省略時は None）
+    pub model:   Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -110,10 +124,13 @@ pub struct ParseResult {
 /// `.hb` テキストを解析し、`ParseResult` を返す。
 /// エラーが含まれていても可能な限りパースを継続する（寛容なパーサ）。
 pub fn parse_hb(text: &str) -> ParseResult {
-    let mut goals:   Vec<ParsedGoal>    = Vec::new();
-    let mut errors:  Vec<ParseError>    = Vec::new();
-    let mut current: Option<ParsedGoal> = None;
-    let mut file_lang: TargetLang       = TargetLang::Rust;
+    let mut goals:      Vec<ParsedGoal>    = Vec::new();
+    let mut errors:     Vec<ParseError>    = Vec::new();
+    let mut current:    Option<ParsedGoal> = None;
+    let mut file_lang:  TargetLang         = TargetLang::Rust;
+    let mut file_agent: Option<AgentKind>  = None;
+    let mut file_api_key: Option<String>   = None;
+    let mut file_model: Option<String>     = None;
 
     for (line_idx, raw_line) in text.lines().enumerate() {
         let line_no = line_idx as u32;
@@ -134,14 +151,87 @@ pub fn parse_hb(text: &str) -> ParseResult {
         match kw_lower.as_str() {
             "lang" => {
                 // ファイルレベルの言語指定: `lang python`
-                let lang_str = rest.split_whitespace().next().unwrap_or(rest);
-                match lang_str.parse::<TargetLang>() {
+                let val = rest.split_whitespace().next().unwrap_or(rest);
+                match val.parse::<TargetLang>() {
                     Ok(l)  => file_lang = l,
                     Err(e) => errors.push(ParseError {
                         span:     Span::whole_line(line_no, trimmed.len() as u32),
                         message:  format!("lang 指定エラー: {e}"),
                         severity: ErrorSeverity::Error,
                     }),
+                }
+            }
+
+            "agent" => {
+                // AI エージェント指定: `agent openai`
+                let val = rest.split_whitespace().next().unwrap_or(rest);
+                match val.parse::<AgentKind>() {
+                    Ok(a)  => file_agent = Some(a),
+                    Err(e) => errors.push(ParseError {
+                        span:     Span::whole_line(line_no, trimmed.len() as u32),
+                        message:  format!("agent 指定エラー: {e}"),
+                        severity: ErrorSeverity::Error,
+                    }),
+                }
+            }
+
+            "api_key" | "apikey" | "api-key" => {
+                // API キー指定: 3 通りの書き方をサポート
+                //   api_key sk-proj-xxx          → 直書き（⚠ .gitignore 推奨）
+                //   api_key $OPENAI_API_KEY      → 環境変数参照（.env も可）
+                //   api_key $MY_CUSTOM_KEY       → 任意の環境変数名
+                let val = rest.split_whitespace().next().unwrap_or(rest);
+                if val.is_empty() {
+                    errors.push(ParseError {
+                        span:     Span::whole_line(line_no, trimmed.len() as u32),
+                        message:  "api_key の後に値が必要です。\
+                                   直書き: `api_key sk-proj-xxx`\
+                                   変数参照: `api_key $OPENAI_API_KEY`".into(),
+                        severity: ErrorSeverity::Error,
+                    });
+                } else if let Some(var_name) = val.strip_prefix('$') {
+                    // ─── $ENV_VAR 形式 ─────────────────────────────────
+                    // .env がロード済みであれば dotenvy 経由の値も std::env::var で取得できる
+                    match std::env::var(var_name) {
+                        Ok(resolved) if !resolved.is_empty() => {
+                            file_api_key = Some(resolved);
+                            // 解決成功: info 扱い（警告なし）
+                        }
+                        Ok(_) | Err(_) => {
+                            errors.push(ParseError {
+                                span:     Span::whole_line(line_no, trimmed.len() as u32),
+                                message:  format!(
+                                    "環境変数 `{var_name}` が未設定または空です。\
+                                     .env ファイルに `{var_name}=sk-...` を追加するか、\
+                                     `export {var_name}=sk-...` を実行してください。"
+                                ),
+                                severity: ErrorSeverity::Warning,
+                            });
+                        }
+                    }
+                } else {
+                    // ─── 直書きキー ─────────────────────────────────────
+                    file_api_key = Some(val.to_owned());
+                    errors.push(ParseError {
+                        span:     Span::whole_line(line_no, trimmed.len() as u32),
+                        message:  "⚠ api_key を .hb ファイルに直書きしています。\
+                                   `api_key $OPENAI_API_KEY` のように環境変数を参照することを推奨します。".into(),
+                        severity: ErrorSeverity::Warning,
+                    });
+                }
+            }
+
+            "model" => {
+                // モデル名指定: `model gpt-4o`
+                let val = rest.split_whitespace().next().unwrap_or(rest);
+                if val.is_empty() {
+                    errors.push(ParseError {
+                        span:     Span::whole_line(line_no, trimmed.len() as u32),
+                        message:  "model の後にモデル名が必要です（例: `model gpt-4o`）".into(),
+                        severity: ErrorSeverity::Error,
+                    });
+                } else {
+                    file_model = Some(val.to_owned());
                 }
             }
 
@@ -254,7 +344,8 @@ pub fn parse_hb(text: &str) -> ParseResult {
                     span:    Span::new(line_no, 0, keyword.len() as u32),
                     message: format!(
                         "不明なキーワード: `{keyword}`\n\
-                         使用可能: `goal`, `require`, `ensure`, `invariant`, `forbid`"
+                         ファイル設定: `agent`, `api_key`, `model`, `lang`\n\
+                         ゴール定義: `goal`, `require`, `ensure`, `invariant`, `forbid`"
                     ),
                     severity: ErrorSeverity::Error,
                 });
@@ -263,7 +354,14 @@ pub fn parse_hb(text: &str) -> ParseResult {
     }
 
     if let Some(g) = current { goals.push(g); }
-    ParseResult { goals, errors, lang: file_lang }
+    ParseResult {
+        goals,
+        errors,
+        lang:    file_lang,
+        agent:   file_agent,
+        api_key: file_api_key,
+        model:   file_model,
+    }
 }
 
 // ---------------------------------------------------------------------------

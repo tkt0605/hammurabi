@@ -1,7 +1,7 @@
 # Hammurabi
 
 > **Logic over Implementation. Proof over Testing.**
-> 「コードを書く」前に「論理を証明する」次世代 AI ネイティブ言語システム
+> 「コードを書く」前に「論理を証明する」AI ネイティブ言語システム
 
 [![Rust](https://img.shields.io/badge/language-Rust-orange?logo=rust)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT-blue)](./LICENSE)
@@ -47,29 +47,107 @@ Hammurabi は3つの原則（**憲法**）を持つ。
 hammurabi/
 ├── src/
 │   ├── lang/
-│   │   ├── goal.rs       # ContractualGoal  — AI への発注書（述語論理）
-│   │   └── rail.rs       # LogicRail<T>     — 証明を封印したコンテナ
-│   └── compiler/
-│       └── verifier.rs   # Verifier trait   — 憲法適合性チェックエンジン
+│   │   ├── goal.rs          # ContractualGoal — AI への発注書（述語論理）
+│   │   └── rail.rs          # LogicRail<T>    — 証明を封印したコンテナ
+│   ├── compiler/
+│   │   └── verifier.rs      # Verifier trait  — 憲法適合性チェックエンジン
+│   ├── codegen.rs            # ContractualGoal → 多言語コードスケルトン生成
+│   ├── ai_gen/
+│   │   ├── mod.rs            # AiGoalGenerator — 自然言語 → ContractualGoal
+│   │   └── client.rs         # OpenAI / Anthropic HTTP クライアント
+│   ├── config.rs             # config.hb / .env パーサー
+│   ├── lsp/
+│   │   └── mod.rs            # .hb パーサー + LSP 実装（補完・検証・ホバー）
+│   ├── proof_store.rs        # ProofToken の永続化と署名検証
+│   ├── math.rs               # 数学的ユーティリティ
+│   └── wasm.rs               # WASM バインディング（feature: wasm）
+├── src/bin/
+│   ├── run_hb.rs             # メイン CLI（コード生成 / AI ゴール生成）
+│   └── hammurabi_lsp.rs      # LSP サーバーバイナリ
+├── config.hb                 # AI エージェント設定ファイル
+├── .env.example              # 環境変数テンプレート
+└── test.hb                   # サンプル .hb ファイル
 ```
 
 ### データフロー
 
+#### モード 1：`.hb` ファイルからコード生成
+
 ```
-[開発者] ContractualGoal を定義（述語論理）
+[.hb ファイル]  goal ブロックを記述
     │
     ▼
-[Verifier] Z3 で充足性・網羅性を証明
-    │  証明失敗 → コンパイルエラー（実行前に止まる）
-    ▼
-[ProofToken] 偽造不可のトークンを発行
+[LSP パーサー]  parse_hb() — .hb テキスト → Vec<ContractualGoal>
     │
     ▼
-[LogicRail<T>] 値 + 証明をシールして封印
-    │  map / merge で変換しても常に再証明が必要
+[Verifier]  MockVerifier / Z3Verifier で制約を証明
+    │  証明失敗 → エラー（実行前に止まる）
     ▼
-[実行] ProofToken を持たない値は型システムが存在を認識しない
+[CodeGenerator]  ContractualGoal → 各言語のコードスケルトン
+    │
+    ▼
+[出力]  Rust / Python / Go / Java / JavaScript / TypeScript
 ```
+
+#### モード 2：自然言語から AI ゴール生成
+
+```
+[自然言語の説明]  "Safely divide two integers."
+    │
+    ▼
+[AiGoalGenerator]  OpenAI / Anthropic / Mock
+    │  GPT-4o / Claude に .hb フォーマットで出力させる
+    ▼
+[.hb テキスト]  AI が生成した ContractualGoal の定義
+    │
+    ▼
+[LSP パーサー]  parse_hb() → Vec<ContractualGoal>
+    │
+    ▼
+[CodeGenerator]  多言語コードスケルトンとして出力
+```
+
+---
+
+## `.hb` ファイルフォーマット
+
+Hammurabi 専用の DSL（ドメイン固有言語）。`ContractualGoal` を宣言的に記述する。
+
+```
+// ファイル設定（goal ブロックの前に記述）
+agent   openai              // AI バックエンド: openai | anthropic | mock
+model   gpt-4o              // モデル名（省略時はエージェントのデフォルト）
+lang    rust                // 出力言語: rust | python | go | java | javascript | typescript
+// api_key $OPENAI_API_KEY  // API キー（.env 推奨）
+
+// goal ブロック（1 ファイルに複数定義可）
+goal safe_division
+require Or(InRange(divisor, -9223372036854775808, -1), InRange(divisor, 1, 9223372036854775807))
+require InRange(dividend, -9223372036854775808, 9223372036854775807)
+ensure result_is_finite
+ensure result_within_i64_range
+invariant no_memory_aliasing
+forbid RuntimeNullCheck
+forbid UnprovenUnwrap
+```
+
+### 述語一覧
+
+| 述語 | 意味 |
+|------|------|
+| `NonNull(x)` | 変数 `x` が null でないこと |
+| `InRange(x, min, max)` | 変数 `x` が `[min, max]` の範囲内にあること |
+| `Or(p1, p2)` | 述語 `p1` または `p2` が成立すること |
+| `<atom>` | 任意のアトム述語（意味は Z3 / Verifier が解釈） |
+
+### 禁止パターン（`forbid`）
+
+| パターン | 意味 |
+|----------|------|
+| `RuntimeNullCheck` | 実行時のヌルチェック（`if x == nil`）を禁止 |
+| `UnprovenUnwrap` | 証明なき `unwrap()` / `!` を禁止 |
+| `NonExhaustiveBranch` | 非網羅的な分岐を禁止 |
+| `CatchAllSuppression` | `_ =>` / catch-all による抑制を禁止 |
 
 ---
 
@@ -83,17 +161,12 @@ hammurabi/
 use hammurabi::lang::goal::{ContractualGoal, ForbiddenPattern, Predicate};
 
 let goal = ContractualGoal::new("safe_division")
-    // 事前条件: 除数はゼロ以外であること
-    .require(Predicate::non_null("divisor"))
     .require(Predicate::or(
         Predicate::in_range("divisor", i64::MIN, -1),
         Predicate::in_range("divisor",  1, i64::MAX),
     ))
-    // 事後条件: 結果は有限であること
     .ensure(Predicate::atom("result_is_finite"))
-    // 不変条件: 実行中メモリエイリアスなし
     .invariant(Predicate::atom("no_memory_aliasing"))
-    // 禁止パターン: if 文による場当たり的なヌルチェック
     .forbid(ForbiddenPattern::RuntimeNullCheck);
 ```
 
@@ -112,7 +185,6 @@ use hammurabi::compiler::verifier::MockVerifier;
 
 let verifier = MockVerifier::default();
 
-// bind: 制約を Verifier に証明させてはじめて値が封印される
 let divisor = LogicRail::bind(
     "divisor",
     5_i64,
@@ -123,7 +195,6 @@ let divisor = LogicRail::bind(
     &verifier,
 )?;
 
-// map: 変換後も新たな制約と証明が必要（モナド的構造）
 let result = dividend.map(
     "result",
     |d| d / *divisor.extract(),
@@ -134,26 +205,20 @@ let result = dividend.map(
 println!("{}", result.proof()); // ProofToken[Mock✓|hash=...]
 ```
 
-`T: Send + Sync` を型パラメータに要求することで、  
-Apple M5 Pro の Unified Memory 上でのスレッド安全性を **実行時コストゼロ** で保証する。
-
 ---
 
 ### 3. `Verifier` — 憲法適合性チェックエンジン
 
 ```rust
 pub trait Verifier {
-    // 値が制約を満たすことを証明し、ProofToken を発行する
     fn verify_constraints<T: Debug>(
         &self, value: &T, constraints: &[Constraint],
     ) -> Result<ProofToken, VerificationError>;
 
-    // ContractualGoal が 3 つの憲法原則に適合するか検証する
     fn verify_goal(
         &self, goal: &ContractualGoal,
     ) -> Result<ConstitutionalReport, VerificationError>;
 
-    // ∀ input. precondition → invariant が成立するか Z3 で証明する
     fn prove_invariant(
         &self, preconditions: &[Predicate], invariant: &Predicate,
     ) -> Result<ProofStatus, VerificationError>;
@@ -193,37 +258,110 @@ cargo build
 cargo test
 ```
 
+### API キーの設定（AI 機能を使う場合）
+
+```bash
+cp .env.example .env
+# .env を編集して OPENAI_API_KEY または ANTHROPIC_API_KEY を設定
+```
+
+```bash
+# .env
+OPENAI_API_KEY=sk-proj-xxxxxxxxxxxxxxxxxxxxxxxxxxxx
+ANTHROPIC_API_KEY=sk-ant-xxxxxxxxxxxxxxxxxxxxxxxxxxxx
+```
+
 ### Z3 本番バックエンドを有効化
 
 ```bash
 # macOS
 brew install z3
 
-# ビルド
 cargo build --features z3-backend
 ```
 
-`z3-backend` feature が有効な場合、`Z3Verifier` が MockVerifier を置き換え、  
-全ての制約検証に本物の SMT ソルバーが使用される。
+---
+
+## CLI — `run_hb`
+
+### 1. `.hb` ファイルからコード生成
+
+```bash
+# デフォルト（.hb 内の lang 設定を使用）
+cargo run --bin run_hb -- test.hb
+
+# 言語オーバーライド
+cargo run --bin run_hb -- test.hb --lang python
+cargo run --bin run_hb -- test.hb --lang typescript
+```
+
+### 2. `config.hb` を使った AI ゴール生成
+
+```bash
+cargo run --features ai --bin run_hb -- \
+    --config config.hb \
+    --ai "Safely divide two integers. Divisor must not be zero."
+```
+
+### 3. CLI 引数で AI エージェントを直接指定
+
+```bash
+cargo run --features ai --bin run_hb -- \
+    --agent openai \
+    --api-key sk-proj-... \
+    --model gpt-4o \
+    --lang typescript \
+    --ai "Validate an email address."
+```
+
+### 4. Mock エージェント（API キー不要・開発用）
+
+```bash
+cargo run --bin run_hb -- \
+    --agent mock \
+    --ai "Compute the GCD of two non-negative integers."
+```
+
+### 優先順位
+
+```
+CLI 引数  >  .hb ファイル内設定  >  config.hb  >  デフォルト値
+```
 
 ---
 
-## テスト結果
+## LSP — `hammurabi_lsp`
 
-```
-running 9 tests
-test compiler::verifier::tests::constitutional_report_compliant   ... ok
-test compiler::verifier::tests::disprove_false_invariant          ... ok
-test compiler::verifier::tests::mock_verifier_accepts_valid_range ... ok
-test compiler::verifier::tests::mock_verifier_rejects_inverted_range ... ok
-test compiler::verifier::tests::mock_verifier_rejects_malformed_goal ... ok
-test compiler::verifier::tests::prove_true_invariant              ... ok
-test lang::rail::tests::bind_succeeds_with_valid_constraints      ... ok
-test lang::rail::tests::map_produces_new_rail                     ... ok
-test lang::rail::tests::merge_combines_two_rails                  ... ok
+`.hb` ファイルに対して LSP（Language Server Protocol）の補完・診断・ホバーを提供するサーバー。
 
-test result: ok. 9 passed; 0 failed
+```bash
+cargo build --bin hammurabi_lsp
 ```
+
+対応するエディタ（VS Code など）に LSP サーバーとして登録することで、`.hb` ファイルの編集支援が有効になる。
+
+---
+
+## AI エージェント
+
+| エージェント | `--agent` | 必要なもの | 説明 |
+|-------------|-----------|------------|------|
+| `MockAiGenerator` | `mock` | なし | キーワード解析、オフライン動作（開発・テスト用） |
+| `OpenAiGenerator` | `openai` | `ai` feature + API キー | GPT-4o による ContractualGoal 生成 |
+| `AnthropicGenerator` | `anthropic` | `ai` feature + API キー | Claude による ContractualGoal 生成 |
+
+---
+
+## コード生成対応言語
+
+| 言語 | `--lang` | 拡張子 |
+|------|----------|--------|
+| Rust | `rust` | `.rs` |
+| Python | `python` | `.py` |
+| Go | `go` | `.go` |
+| Java | `java` | `.java` |
+| JavaScript | `javascript` | `.js` |
+| TypeScript | `typescript` | `.ts` |
 
 ---
 
@@ -234,12 +372,17 @@ test result: ok. 9 passed; 0 failed
 | ✅ | `ContractualGoal` — 述語論理による仕様記述 |
 | ✅ | `LogicRail<T>` — 証明封印コンテナ |
 | ✅ | `MockVerifier` — 開発用バックエンド |
-| ✅ | `Z3Verifier` — SMT バックエンド（feature flag） |
-| 🔄 | `ProofToken` の永続化と署名検証 |
-| ⏳ | `ContractualGoal` から Rust コードの自動生成 |
-| ⏳ | WASM ターゲットでのブラウザ実行 |
-| ⏳ | LSP（Language Server Protocol）統合 |
-| ⏳ | AI エージェントとの `ContractualGoal` 自動生成連携 |
+| ✅ | `Z3Verifier` — SMT バックエンド（`z3-backend` feature） |
+| ✅ | `ProofToken` の永続化と署名検証（`proof_store`） |
+| ✅ | `.hb` DSL パーサー（LSP 共通実装） |
+| ✅ | `ContractualGoal` から多言語コードスケルトン自動生成（6言語対応） |
+| ✅ | `AiGoalGenerator` — 自然言語 → ContractualGoal（OpenAI / Anthropic / Mock） |
+| ✅ | `config.hb` / `.env` による設定管理 |
+| ✅ | LSP サーバー — `.hb` ファイルの補完・診断・ホバー |
+| ✅ | WASM ターゲットでのブラウザ実行（`wasm` feature） |
+| ⏳ | VS Code 拡張の公開 |
+| ⏳ | `ForAll` / `Exists` 量化述語の Z3 エンコード実装 |
+| ⏳ | 正規表現制約など新しい `Constraint` タイプ |
 
 ---
 
@@ -255,7 +398,6 @@ Issue・PR・Star すべて歓迎です。
 - **ドキュメント** — 英語 README、設計解説記事
 
 ```bash
-# フォーク → ブランチ作成 → PR
 git checkout -b feature/your-idea
 cargo test  # テストが全て通ることを確認してから PR
 ```
@@ -267,9 +409,16 @@ cargo test  # テストが全て通ることを確認してから PR
 | ファイル | 説明 |
 |----------|------|
 | [CLAUDE.md](./CLAUDE.md) | AI (Claude) 向けプロジェクトガイド |
+| [config.hb](./config.hb) | AI エージェント設定ファイル（テンプレート） |
+| [.env.example](./.env.example) | 環境変数テンプレート |
+| [test.hb](./test.hb) | `.hb` フォーマットのサンプルファイル |
 | `src/lang/goal.rs` | `ContractualGoal` と `Predicate` の設計詳細 |
 | `src/lang/rail.rs` | `LogicRail<T>` と `ProofToken` の設計詳細 |
 | `src/compiler/verifier.rs` | `Verifier` トレイトと Z3 バックエンドの実装 |
+| `src/codegen.rs` | 多言語コードジェネレーターの実装 |
+| `src/ai_gen/mod.rs` | AI ゴール生成パイプラインの実装 |
+| `src/config.rs` | `config.hb` / `.env` パーサーの実装 |
+| `src/lsp/mod.rs` | `.hb` パーサーと LSP 実装 |
 
 ---
 

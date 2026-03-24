@@ -14,7 +14,12 @@
 //! ```
 
 use serde::{Deserialize, Serialize};
-use super::{AiGenError, AiGenOutput, AiGoalGenerator, PromptBuilder, hb_to_output};
+use super::{
+    AiCodeWriter, AiGenError, AiGenOutput, AiGoalGenerator,
+    CodePromptBuilder, CodeWriteOutput, PromptBuilder, hb_to_output,
+};
+use crate::codegen::TargetLang;
+use crate::lang::goal::ContractualGoal;
 
 // ---------------------------------------------------------------------------
 // OpenAiGenerator
@@ -93,6 +98,64 @@ impl AiGoalGenerator for AnthropicGenerator {
 }
 
 // ---------------------------------------------------------------------------
+// OpenAiCodeWriter — AI が ContractualGoal から実装コードを生成
+// ---------------------------------------------------------------------------
+
+/// OpenAI Chat Completions API を使って契約から実装コードを生成する。
+pub struct OpenAiCodeWriter {
+    api_key: String,
+    model:   String,
+}
+
+impl OpenAiCodeWriter {
+    pub fn new(api_key: impl Into<String>, model: impl Into<String>) -> Self {
+        Self { api_key: api_key.into(), model: model.into() }
+    }
+}
+
+impl AiCodeWriter for OpenAiCodeWriter {
+    fn write_code(
+        &self,
+        goal: &ContractualGoal,
+        lang: &TargetLang,
+    ) -> Result<CodeWriteOutput, AiGenError> {
+        let system = CodePromptBuilder::system_prompt(lang);
+        let user   = CodePromptBuilder::user_prompt(goal, lang);
+        let source = call_openai(&self.api_key, &self.model, &system, &user)?;
+        Ok(CodeWriteOutput { source, lang: lang.clone(), warnings: vec![] })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AnthropicCodeWriter — AI が ContractualGoal から実装コードを生成
+// ---------------------------------------------------------------------------
+
+/// Anthropic Messages API を使って契約から実装コードを生成する。
+pub struct AnthropicCodeWriter {
+    api_key: String,
+    model:   String,
+}
+
+impl AnthropicCodeWriter {
+    pub fn new(api_key: impl Into<String>, model: impl Into<String>) -> Self {
+        Self { api_key: api_key.into(), model: model.into() }
+    }
+}
+
+impl AiCodeWriter for AnthropicCodeWriter {
+    fn write_code(
+        &self,
+        goal: &ContractualGoal,
+        lang: &TargetLang,
+    ) -> Result<CodeWriteOutput, AiGenError> {
+        let system = CodePromptBuilder::system_prompt(lang);
+        let user   = CodePromptBuilder::user_prompt(goal, lang);
+        let source = call_anthropic(&self.api_key, &self.model, &system, &user)?;
+        Ok(CodeWriteOutput { source, lang: lang.clone(), warnings: vec![] })
+    }
+}
+
+// ---------------------------------------------------------------------------
 // OpenAI API 呼び出し
 // ---------------------------------------------------------------------------
 
@@ -141,7 +204,7 @@ fn call_openai(
         max_tokens:  1024,
     };
 
-    let resp = ureq::post("https://api.openai.com/v1/chat/completions")
+    let mut resp = ureq::post("https://api.openai.com/v1/chat/completions")
         .header("Authorization", &format!("Bearer {api_key}"))
         .header("Content-Type", "application/json")
         .send_json(serde_json::to_value(&body).unwrap())
@@ -214,7 +277,7 @@ fn call_anthropic(
         max_tokens: 1024,
     };
 
-    let resp = ureq::post("https://api.anthropic.com/v1/messages")
+    let mut resp = ureq::post("https://api.anthropic.com/v1/messages")
         .header("x-api-key",         api_key)
         .header("anthropic-version", "2023-06-01")
         .header("Content-Type",      "application/json")

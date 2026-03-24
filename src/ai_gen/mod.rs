@@ -20,8 +20,10 @@
 //! AiGenOutput { goals, raw_hb, warnings }
 //! ```
 
+use crate::codegen::{CodeGenerator, TargetLang};
 use crate::compiler::verifier::{MockVerifier, Verifier};
-use crate::lang::goal::ContractualGoal;
+use crate::config::{AgentKind, HammurabiConfig};
+use crate::lang::goal::{ContractualGoal, ForbiddenPattern, Predicate};
 use crate::lsp::parse_hb;
 use thiserror::Error;
 
@@ -437,6 +439,281 @@ fn to_snake_case(s: &str) -> String {
         .collect::<String>()
         .trim_matches('_')
         .to_owned()
+}
+
+// ---------------------------------------------------------------------------
+// build_generator — HammurabiConfig から AiGoalGenerator を構築するファクトリ
+// ---------------------------------------------------------------------------
+
+/// `HammurabiConfig` の設定に従って適切な `AiGoalGenerator` を生成して返す。
+///
+/// - `Mock`      → `MockAiGenerator`（API 不要）
+/// - `OpenAi`    → `OpenAiGenerator`（`ai` feature が必要）
+/// - `Anthropic` → `AnthropicGenerator`（`ai` feature が必要）
+///
+/// `ai` feature が無効で OpenAI/Anthropic を要求した場合はエラーを返す。
+pub fn build_generator(
+    cfg: &HammurabiConfig,
+) -> Result<Box<dyn AiGoalGenerator>, AiGenError> {
+    match cfg.agent {
+        AgentKind::Mock => {
+            Ok(Box::new(MockAiGenerator))
+        }
+
+        #[cfg(feature = "ai")]
+        AgentKind::OpenAi => {
+            let api_key = cfg.resolve_api_key()
+                .map_err(|_e| AiGenError::Auth)?
+                .ok_or(AiGenError::Auth)?;
+            let model = cfg.resolve_model().to_owned();
+            Ok(Box::new(client::OpenAiGenerator::new(api_key, model)))
+        }
+
+        #[cfg(feature = "ai")]
+        AgentKind::Anthropic => {
+            let api_key = cfg.resolve_api_key()
+                .map_err(|_e| AiGenError::Auth)?
+                .ok_or(AiGenError::Auth)?;
+            let model = cfg.resolve_model().to_owned();
+            Ok(Box::new(client::AnthropicGenerator::new(api_key, model)))
+        }
+
+        #[cfg(not(feature = "ai"))]
+        AgentKind::OpenAi | AgentKind::Anthropic => {
+            Err(AiGenError::Api {
+                message: format!(
+                    "{} を使うには `ai` feature を有効にしてください: \
+                     `cargo run --features ai --bin run_hb -- ...`",
+                    cfg.agent.display_name()
+                ),
+            })
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CodeWriteOutput — AI によるコード生成結果
+// ---------------------------------------------------------------------------
+
+/// `AiCodeWriter::write_code` が返す出力。
+pub struct CodeWriteOutput {
+    /// AI（または Mock）が生成した実装ソースコード
+    pub source: String,
+    /// 生成対象の言語
+    pub lang: TargetLang,
+    /// パース成功だが問題のある箇所の警告リスト
+    pub warnings: Vec<String>,
+}
+
+// ---------------------------------------------------------------------------
+// AiCodeWriter トレイト
+// ---------------------------------------------------------------------------
+
+/// `ContractualGoal` と `TargetLang` から実装コードを生成するバックエンドの抽象インターフェース。
+///
+/// - Mock  → 契約チェック付きスケルトン（TODO コメント付き）
+/// - OpenAI / Anthropic → 契約を満たす実装コードを AI が生成
+pub trait AiCodeWriter {
+    /// `goal` の契約を満たす `lang` 言語の実装コードを生成する。
+    ///
+    /// # Errors
+    /// - ネットワークエラー → `AiGenError::Http`
+    /// - API 認証失敗     → `AiGenError::Auth`
+    /// - 空レスポンス     → `AiGenError::Empty`
+    fn write_code(
+        &self,
+        goal: &ContractualGoal,
+        lang: &TargetLang,
+    ) -> Result<CodeWriteOutput, AiGenError>;
+}
+
+// ---------------------------------------------------------------------------
+// CodePromptBuilder — AI コード生成プロンプト構築
+// ---------------------------------------------------------------------------
+
+/// AI への「コード生成プロンプト」を構築するユーティリティ。
+pub struct CodePromptBuilder;
+
+impl CodePromptBuilder {
+    /// システムプロンプト — AI に言語ルールと Hammurabi 契約の解釈を伝える。
+    pub fn system_prompt(lang: &TargetLang) -> String {
+        let lang_name = lang.display_name();
+        let err_style = match lang {
+            TargetLang::Rust       => "return Err(...) or use Result<T, E>",
+            TargetLang::Python     => "raise ValueError / TypeError",
+            TargetLang::Go         => "return ..., fmt.Errorf(...)",
+            TargetLang::Java       => "throw new IllegalArgumentException(...)",
+            TargetLang::JavaScript => "throw new RangeError(...) or throw new TypeError(...)",
+            TargetLang::TypeScript => "throw new RangeError(...) or throw new TypeError(...)",
+        };
+        format!(
+r#"You are an expert {lang_name} programmer and a Hammurabi logic-first code generator.
+Hammurabi defines functions via formal contracts (preconditions, postconditions, invariants).
+Your task: given a contract, write a COMPLETE, CORRECT {lang_name} implementation.
+
+## Your Output Rules
+1. Output ONLY valid {lang_name} source code — no explanations, no markdown fences
+2. Check EVERY precondition at the top of the function; on violation: {err_style}
+3. Implement actual logic that satisfies ALL postconditions — NO TODO comments
+4. Respect forbidden patterns (e.g. RuntimeNullCheck → use type-safe null handling)
+5. Follow idiomatic {lang_name} style (naming conventions, error handling, etc.)
+6. Include necessary imports / package declarations if needed
+
+## Contract Notation
+- `InRange(var, min, max)`  → var must satisfy min ≤ var ≤ max
+- `NonNull(var)`            → var must not be null/None/undefined
+- `Atom(name)`              → a named boolean property the implementation must guarantee
+- `And(p, q)` / `Or(p, q)` → logical conjunction / disjunction
+- `forbid RuntimeNullCheck` → do NOT use if-null checks; use type-safe alternatives
+- `forbid UnprovenUnwrap`   → do NOT use unwrap()/expect() without proof
+"#
+        )
+    }
+
+    /// ユーザープロンプト — 契約の内容を AI に伝える。
+    pub fn user_prompt(goal: &ContractualGoal, lang: &TargetLang) -> String {
+        let mut prompt = format!(
+            "Write a complete {lang} implementation for the following contract:\n\n",
+            lang = lang.display_name()
+        );
+
+        prompt.push_str(&format!("Function name: {}\n\n", goal.name));
+
+        if !goal.preconditions.is_empty() {
+            prompt.push_str("Preconditions (the caller guarantees these; check and reject if violated):\n");
+            for p in &goal.preconditions {
+                prompt.push_str(&format!("  - {}\n", predicate_to_hb(p)));
+            }
+            prompt.push('\n');
+        }
+
+        if !goal.postconditions.is_empty() {
+            prompt.push_str("Postconditions (the function MUST guarantee these):\n");
+            for p in &goal.postconditions {
+                prompt.push_str(&format!("  - {}\n", predicate_to_hb(p)));
+            }
+            prompt.push('\n');
+        }
+
+        if !goal.invariants.is_empty() {
+            prompt.push_str("Invariants (must hold throughout execution):\n");
+            for p in &goal.invariants {
+                prompt.push_str(&format!("  - {}\n", predicate_to_hb(p)));
+            }
+            prompt.push('\n');
+        }
+
+        if !goal.forbidden.is_empty() {
+            prompt.push_str("Forbidden patterns (do NOT use these):\n");
+            for f in &goal.forbidden {
+                let desc = match f {
+                    ForbiddenPattern::NonExhaustiveBranch  => "NonExhaustiveBranch — all branches must be covered",
+                    ForbiddenPattern::RuntimeNullCheck     => "RuntimeNullCheck — no if-null guards; use type-safe null handling",
+                    ForbiddenPattern::ImplicitCoercion     => "ImplicitCoercion — no implicit type coercions",
+                    ForbiddenPattern::UnprovenUnwrap       => "UnprovenUnwrap — no unwrap()/expect() without proof",
+                    ForbiddenPattern::CatchAllSuppression  => "CatchAllSuppression — no catch-all error handling",
+                };
+                prompt.push_str(&format!("  - {desc}\n"));
+            }
+            prompt.push('\n');
+        }
+
+        prompt.push_str(&format!(
+            "Output ONLY the {lang} source code. No explanations, no markdown.",
+            lang = lang.display_name()
+        ));
+        prompt
+    }
+}
+
+/// `Predicate` を `.hb` フォーマット文字列に変換する（AI プロンプト用）。
+fn predicate_to_hb(p: &Predicate) -> String {
+    match p {
+        Predicate::True            => "true".into(),
+        Predicate::False           => "false".into(),
+        Predicate::Atom(s)         => s.clone(),
+        Predicate::Not(p)          => format!("Not({})", predicate_to_hb(p)),
+        Predicate::And(l, r)       => format!("And({}, {})", predicate_to_hb(l), predicate_to_hb(r)),
+        Predicate::Or(l, r)        => format!("Or({}, {})", predicate_to_hb(l), predicate_to_hb(r)),
+        Predicate::Implies(a, c)   => format!("Implies({}, {})", predicate_to_hb(a), predicate_to_hb(c)),
+        Predicate::ForAll { var, body } => format!("ForAll({var}, {})", predicate_to_hb(body)),
+        Predicate::Exists { var, body } => format!("Exists({var}, {})", predicate_to_hb(body)),
+        Predicate::InRange { var, min, max } => format!("InRange({var}, {min}, {max})"),
+        Predicate::NonNull(v)      => format!("NonNull({v})"),
+        Predicate::Equals(a, b)    => format!("Equals({a}, {b})"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MockAiCodeWriter — CodeGenerator に委譲（API 不要）
+// ---------------------------------------------------------------------------
+
+/// `CodeGenerator` のスケルトンを返す Mock 実装。API 不要。
+#[derive(Debug, Default)]
+pub struct MockAiCodeWriter;
+
+impl AiCodeWriter for MockAiCodeWriter {
+    fn write_code(
+        &self,
+        goal: &ContractualGoal,
+        lang: &TargetLang,
+    ) -> Result<CodeWriteOutput, AiGenError> {
+        let codegen = CodeGenerator::for_lang(lang.clone());
+        let out = codegen.generate(goal);
+        Ok(CodeWriteOutput {
+            source:   out.source().to_owned(),
+            lang:     lang.clone(),
+            warnings: vec!["[Mock] TODO コメントを実際の実装に置き換えてください。".into()],
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// build_code_writer — HammurabiConfig から AiCodeWriter を構築するファクトリ
+// ---------------------------------------------------------------------------
+
+/// `HammurabiConfig` の設定に従って適切な `AiCodeWriter` を生成して返す。
+///
+/// - `Mock`      → `MockAiCodeWriter`（API 不要）
+/// - `OpenAi`    → `OpenAiCodeWriter`（`ai` feature が必要）
+/// - `Anthropic` → `AnthropicCodeWriter`（`ai` feature が必要）
+pub fn build_code_writer(
+    cfg: &HammurabiConfig,
+) -> Result<Box<dyn AiCodeWriter>, AiGenError> {
+    match cfg.agent {
+        AgentKind::Mock => {
+            Ok(Box::new(MockAiCodeWriter))
+        }
+
+        #[cfg(feature = "ai")]
+        AgentKind::OpenAi => {
+            let api_key = cfg.resolve_api_key()
+                .map_err(|_| AiGenError::Auth)?
+                .ok_or(AiGenError::Auth)?;
+            let model = cfg.resolve_model().to_owned();
+            Ok(Box::new(client::OpenAiCodeWriter::new(api_key, model)))
+        }
+
+        #[cfg(feature = "ai")]
+        AgentKind::Anthropic => {
+            let api_key = cfg.resolve_api_key()
+                .map_err(|_| AiGenError::Auth)?
+                .ok_or(AiGenError::Auth)?;
+            let model = cfg.resolve_model().to_owned();
+            Ok(Box::new(client::AnthropicCodeWriter::new(api_key, model)))
+        }
+
+        #[cfg(not(feature = "ai"))]
+        AgentKind::OpenAi | AgentKind::Anthropic => {
+            Err(AiGenError::Api {
+                message: format!(
+                    "{} を使うには `ai` feature を有効にしてください: \
+                     `cargo run --features ai --bin run_hb -- ...`",
+                    cfg.agent.display_name()
+                ),
+            })
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
