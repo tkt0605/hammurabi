@@ -60,17 +60,23 @@ docs: README を更新
 
 ---
 
-## ビルド・テスト（今後設定）
-
-技術スタック決定後にビルドコマンド・テストコマンドをここに記載します。
+## ビルド・テスト
 
 ```bash
-# ビルド（未設定）
-# npm run build  /  cargo build  /  go build  など
+# 最小（Mock のみ・依存なし）
+cargo build
+cargo test
 
-# テスト（未設定）
-# npm test  /  cargo test  /  go test ./...  など
+# AI 生成（OpenAI/Anthropic）と Z3 検証を両方使う
+cargo build --features full
+cargo test --features full
+
+# 個別に有効化
+cargo build --features ai           # AI API クライアント
+cargo build --features z3-backend   # Z3 SMT（--verifier z3）
 ```
+
+外部ノードへ配布する場合は `cargo install --path . --features full`、または GitHub Releases のプリビルドバイナリ（`dist` / `cargo-dist`）を推奨。
 
 ---
 

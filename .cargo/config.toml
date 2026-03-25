@@ -1,0 +1,16 @@
+# Hammurabi プロジェクト向け Cargo 設定
+#
+# Z3 SMT ソルバーのビルドに必要な環境変数を設定します。
+# Homebrew でインストールした Z3 のヘッダ・ライブラリを pkg-config 経由で解決します。
+#
+# セットアップ:
+#   brew install z3
+#   cargo build --features full   # または --features z3-backend のみ
+
+[env]
+PKG_CONFIG_PATH          = "/opt/homebrew/opt/z3/lib/pkgconfig"
+Z3_SYS_Z3_HEADER         = "/opt/homebrew/opt/z3/include/z3.h"
+BINDGEN_EXTRA_CLANG_ARGS = "-I/opt/homebrew/opt/z3/include"
+
+[target.aarch64-apple-darwin]
+rustflags = ["-L", "/opt/homebrew/opt/z3/lib"]

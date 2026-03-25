@@ -485,7 +485,7 @@ pub fn build_generator(
             Err(AiGenError::Api {
                 message: format!(
                     "{} を使うには `ai` feature 付きで再インストールしてください: \
-                     `cargo install --path . --features ai`",
+                     `cargo build --features ai` または `cargo build --features full`",
                     cfg.agent.display_name()
                 ),
             })
@@ -710,7 +710,7 @@ pub fn build_code_writer(
             Err(AiGenError::Api {
                 message: format!(
                     "{} を使うには `ai` feature 付きで再インストールしてください: \
-                     `cargo install --path . --features ai`",
+                     `cargo build --features ai` または `cargo build --features full`",
                     cfg.agent.display_name()
                 ),
             })

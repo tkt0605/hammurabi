@@ -3,5 +3,26 @@ rust = "latest"
 
 [env]
 # z3-sys (bindgen) が Homebrew の z3 ヘッダー・ライブラリを見つけられるようにする
-CPATH        = "/opt/homebrew/include"
-LIBRARY_PATH = "/opt/homebrew/lib"
+CPATH                    = "/opt/homebrew/include"
+LIBRARY_PATH             = "/opt/homebrew/lib"
+PKG_CONFIG_PATH          = "/opt/homebrew/opt/z3/lib/pkgconfig"
+Z3_SYS_Z3_HEADER         = "/opt/homebrew/opt/z3/include/z3.h"
+BINDGEN_EXTRA_CLANG_ARGS = "-I/opt/homebrew/opt/z3/include"
+DYLD_LIBRARY_PATH        = "/opt/homebrew/opt/z3/lib"
+RUSTFLAGS                = "-L /opt/homebrew/opt/z3/lib"
+
+[tasks.build]
+description = "最小ビルド（ai / z3 なし）"
+run         = "cargo build"
+
+[tasks.build-full]
+description = "フルビルド（ai + z3-backend）"
+run         = "cargo build --features full"
+
+[tasks.test]
+description = "テスト（フル feature）"
+run         = "cargo test --features full"
+
+[tasks.check-z3]
+description = "hb check を Z3 SMT で実行（要 build-full）"
+run         = 'cargo run --features full --bin hb -- check "${FILE:-test.hb}" --verifier z3'

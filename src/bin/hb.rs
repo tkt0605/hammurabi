@@ -28,9 +28,14 @@ use std::{env, fs, process};
 use hammurabi::{
     ai_gen::{build_code_writer, build_generator},
     codegen::TargetLang,
+    compiler::verifier::{MockVerifier, Verifier, ConstitutionalReport},
     config::{AgentKind, DotenvResult, HammurabiConfig, load_dotenv},
+    lang::goal::ContractualGoal,
     lsp::{parse_hb, ErrorSeverity},
 };
+
+#[cfg(feature = "z3-backend")]
+use hammurabi::compiler::verifier::z3_backend::Z3Verifier;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const BIN_NAME: &str = "hb";
@@ -43,15 +48,24 @@ enum Subcommand {
     Gen   { file: String,   opts: CommonOpts },
     Ai    { prompt: String, opts: CommonOpts },
     Init  { force: bool },
-    Check { file: String },
+    Check { file: String,   verifier: VerifierKind },
+}
+
+/// 検証バックエンドの選択
+#[derive(Debug, Clone, PartialEq, Default)]
+enum VerifierKind {
+    #[default]
+    Mock,
+    Z3,
 }
 
 struct CommonOpts {
-    config:  Option<String>,
-    agent:   Option<AgentKind>,
-    api_key: Option<String>,
-    model:   Option<String>,
-    lang:    Option<TargetLang>,
+    config:   Option<String>,
+    agent:    Option<AgentKind>,
+    api_key:  Option<String>,
+    model:    Option<String>,
+    lang:     Option<TargetLang>,
+    verifier: VerifierKind,
 }
 
 // ---------------------------------------------------------------------------
@@ -88,8 +102,8 @@ fn parse_args() -> Subcommand {
             Subcommand::Init { force }
         }
         "check" => {
-            let (file, _) = parse_file_and_opts(&raw[1..], "check");
-            Subcommand::Check { file }
+            let (file, opts) = parse_file_and_opts(&raw[1..], "check");
+            Subcommand::Check { file, verifier: opts.verifier }
         }
         unknown => {
             // 後方互換: `hb <file.hb>` は `hb gen <file.hb>` と同じ扱い
@@ -106,12 +120,13 @@ fn parse_args() -> Subcommand {
 }
 
 fn parse_file_and_opts(args: &[String], subcmd: &str) -> (String, CommonOpts) {
-    let mut file:    Option<String>    = None;
-    let mut config:  Option<String>    = None;
-    let mut agent:   Option<AgentKind> = None;
-    let mut api_key: Option<String>    = None;
-    let mut model:   Option<String>    = None;
-    let mut lang:    Option<TargetLang>= None;
+    let mut file:     Option<String>    = None;
+    let mut config:   Option<String>    = None;
+    let mut agent:    Option<AgentKind> = None;
+    let mut api_key:  Option<String>    = None;
+    let mut model:    Option<String>    = None;
+    let mut lang:     Option<TargetLang>= None;
+    let mut verifier: VerifierKind      = VerifierKind::Mock;
 
     let mut i = 0usize;
     while i < args.len() {
@@ -132,6 +147,10 @@ fn parse_file_and_opts(args: &[String], subcmd: &str) -> (String, CommonOpts) {
                 lang = Some(v.parse::<TargetLang>().unwrap_or_else(|e| {
                     eprintln!("--lang エラー: {e}"); process::exit(1);
                 }));
+            }
+            "--verifier" => {
+                let v = next_val(args, &mut i, "--verifier");
+                verifier = parse_verifier_kind(&v);
             }
             flag if flag.starts_with('-') => {
                 eprintln!("エラー: 不明なフラグ `{flag}` (subcommand: {subcmd})\n");
@@ -151,16 +170,17 @@ fn parse_file_and_opts(args: &[String], subcmd: &str) -> (String, CommonOpts) {
         process::exit(1);
     });
 
-    (file, CommonOpts { config, agent, api_key, model, lang })
+    (file, CommonOpts { config, agent, api_key, model, lang, verifier })
 }
 
 fn parse_prompt_and_opts(args: &[String]) -> (String, CommonOpts) {
-    let mut prompt:  Option<String>    = None;
-    let mut config:  Option<String>    = None;
-    let mut agent:   Option<AgentKind> = None;
-    let mut api_key: Option<String>    = None;
-    let mut model:   Option<String>    = None;
-    let mut lang:    Option<TargetLang>= None;
+    let mut prompt:   Option<String>    = None;
+    let mut config:   Option<String>    = None;
+    let mut agent:    Option<AgentKind> = None;
+    let mut api_key:  Option<String>    = None;
+    let mut model:    Option<String>    = None;
+    let mut lang:     Option<TargetLang>= None;
+    let mut verifier: VerifierKind      = VerifierKind::Mock;
 
     let mut i = 0usize;
     while i < args.len() {
@@ -182,6 +202,10 @@ fn parse_prompt_and_opts(args: &[String]) -> (String, CommonOpts) {
                     eprintln!("--lang エラー: {e}"); process::exit(1);
                 }));
             }
+            "--verifier" => {
+                let v = next_val(args, &mut i, "--verifier");
+                verifier = parse_verifier_kind(&v);
+            }
             flag if flag.starts_with('-') => {
                 eprintln!("エラー: 不明なフラグ `{flag}` (subcommand: ai)\n");
                 print_help();
@@ -200,7 +224,7 @@ fn parse_prompt_and_opts(args: &[String]) -> (String, CommonOpts) {
         process::exit(1);
     });
 
-    (prompt, CommonOpts { config, agent, api_key, model, lang })
+    (prompt, CommonOpts { config, agent, api_key, model, lang, verifier })
 }
 
 fn next_val(args: &[String], i: &mut usize, flag: &str) -> String {
@@ -210,6 +234,90 @@ fn next_val(args: &[String], i: &mut usize, flag: &str) -> String {
         process::exit(1);
     }
     args[*i].clone()
+}
+
+fn parse_verifier_kind(s: &str) -> VerifierKind {
+    match s.to_lowercase().as_str() {
+        "z3" | "z3-smt" | "smt" => {
+            #[cfg(not(feature = "z3-backend"))]
+            {
+                eprintln!("エラー: --verifier z3 を使うには z3-backend feature が必要です。");
+                eprintln!("  cargo build --features z3-backend でビルドしてください。");
+                process::exit(1);
+            }
+            #[cfg(feature = "z3-backend")]
+            VerifierKind::Z3
+        }
+        "mock" | "default" => VerifierKind::Mock,
+        other => {
+            eprintln!("エラー: 不明な verifier `{other}` — z3 / mock のいずれかを指定");
+            process::exit(1);
+        }
+    }
+}
+
+/// goal を指定された検証バックエンドで検証し、結果を表示する。
+/// 戻り値: (compliant件数, violation件数)
+fn verify_goals_with_backend(
+    goals: &[hammurabi::lsp::ParsedGoal],
+    verifier_kind: &VerifierKind,
+) -> (usize, usize) {
+    let mut ok_count  = 0usize;
+    let mut err_count = 0usize;
+
+    match verifier_kind {
+        VerifierKind::Mock => {
+            let v = MockVerifier::default();
+            for pg in goals {
+                run_goal_verification(&pg.goal, &v, &mut ok_count, &mut err_count);
+            }
+        }
+        VerifierKind::Z3 => {
+            #[cfg(feature = "z3-backend")]
+            {
+                let v = Z3Verifier::new();
+                for pg in goals {
+                    run_goal_verification(&pg.goal, &v, &mut ok_count, &mut err_count);
+                }
+            }
+            #[cfg(not(feature = "z3-backend"))]
+            {
+                eprintln!("z3-backend feature が無効です。");
+                process::exit(1);
+            }
+        }
+    }
+
+    (ok_count, err_count)
+}
+
+fn run_goal_verification<V: Verifier>(
+    goal:      &ContractualGoal,
+    verifier:  &V,
+    ok_count:  &mut usize,
+    err_count: &mut usize,
+) {
+    match verifier.verify_goal(goal) {
+        Ok(report) => {
+            print_verification_report(&report);
+            if report.is_compliant() { *ok_count  += 1; }
+            else                     { *err_count += 1; }
+        }
+        Err(e) => {
+            println!("  ❌  検証エラー: {e}");
+            *err_count += 1;
+        }
+    }
+}
+
+fn print_verification_report(report: &ConstitutionalReport) {
+    let icon = if report.is_compliant() { "✅" } else { "❌" };
+    println!("  {icon} [{:?}] {}", report.proof_backend, report.goal_name);
+    if !report.is_compliant() {
+        for v in &report.violations {
+            println!("       ✗ {v}");
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -257,10 +365,10 @@ fn main() {
     }
 
     match parse_args() {
-        Subcommand::Gen   { file, opts }   => cmd_gen(&file, &opts),
-        Subcommand::Ai    { prompt, opts } => cmd_ai(&prompt, &opts),
-        Subcommand::Init  { force }        => cmd_init(force),
-        Subcommand::Check { file }         => cmd_check(&file),
+        Subcommand::Gen   { file, opts }            => cmd_gen(&file, &opts),
+        Subcommand::Ai    { prompt, opts }           => cmd_ai(&prompt, &opts),
+        Subcommand::Init  { force }                  => cmd_init(force),
+        Subcommand::Check { file, verifier }         => cmd_check(&file, &verifier),
     }
 }
 
@@ -323,6 +431,21 @@ fn cmd_gen(path: &str, opts: &CommonOpts) {
     if effective_cfg.agent.requires_api_key() {
         println!("📐  モデル: {}", effective_cfg.resolve_model());
     }
+
+    // ── Z3 が有効な場合、コード生成前に仕様を証明 ─────────────────────
+    let verifier_kind = &opts.verifier;
+    if *verifier_kind == VerifierKind::Z3 {
+        println!();
+        println!("🔬  Z3 SMT で仕様を証明中…");
+        let (ok, err) = verify_goals_with_backend(&result.goals, verifier_kind);
+        println!("    合格: {ok} 個 / 違反: {err} 個");
+        if err > 0 {
+            eprintln!("❌  仕様に違反があるためコード生成を中止しました。");
+            process::exit(1);
+        }
+        println!("    ✅  全ての仕様が証明されました。コード生成を開始します。");
+    }
+
     if use_ai { println!("✨  AI が契約を満たす実装コードを生成します…"); }
     println!();
 
@@ -490,16 +613,21 @@ fn create_file(path: &str, force: bool, content: &str) {
 // hb check <file.hb>
 // ---------------------------------------------------------------------------
 
-fn cmd_check(path: &str) {
+fn cmd_check(path: &str, verifier_kind: &VerifierKind) {
     let text = fs::read_to_string(path).unwrap_or_else(|e| {
         eprintln!("ファイル読み込みエラー: {path}: {e}");
         process::exit(1);
     });
 
-    println!("🔍  {BIN_NAME} check: {path}\n");
+    let backend_label = match verifier_kind {
+        VerifierKind::Mock => "Mock",
+        VerifierKind::Z3   => "Z3 SMT",
+    };
+    println!("🔍  {BIN_NAME} check [{backend_label}]: {path}\n");
 
     let result = parse_hb(&text);
 
+    // パース警告・エラーを表示
     let warnings: Vec<_> = result.errors.iter().filter(|e| e.severity == ErrorSeverity::Warning).collect();
     let errors:   Vec<_> = result.errors.iter().filter(|e| e.severity == ErrorSeverity::Error).collect();
 
@@ -509,9 +637,8 @@ fn cmd_check(path: &str) {
     for e in &errors {
         println!("❌  行 {}: {}", e.span.line + 1, e.message);
     }
-
     if errors.is_empty() && warnings.is_empty() {
-        println!("✅  エラーなし");
+        println!("✅  構文エラーなし");
     }
 
     println!();
@@ -520,7 +647,21 @@ fn cmd_check(path: &str) {
     if let Some(ref a) = result.agent  { println!("  agent   : {}", a.display_name()); }
     if let Some(ref m) = result.model  { println!("  model   : {m}"); }
 
-    if !errors.is_empty() {
+    if result.goals.is_empty() {
+        if !errors.is_empty() { process::exit(1); }
+        return;
+    }
+
+    // ── 契約の論理検証（Verifier による証明）──────────────────────────
+    println!();
+    println!("── ContractualGoal 検証 ({backend_label}) ──────────────────────────");
+
+    let (ok, err) = verify_goals_with_backend(&result.goals, verifier_kind);
+
+    println!();
+    println!("  合格: {ok} 個 / 違反: {err} 個");
+
+    if !errors.is_empty() || err > 0 {
         process::exit(1);
     }
 }
@@ -540,27 +681,39 @@ r#"hb {VERSION} — Hammurabi Logic-First Code Generator
   hb check <file.hb>             .hb ファイルの構文チェック
 
 OPTIONS（gen / ai 共通）:
-  --config  <path>   config.hb のパス
-  --agent   <name>   openai | anthropic | mock
-  --api-key <key>    API キー（省略時は .env を参照）
-  --model   <name>   gpt-4o / claude-3-5-sonnet-20241022 など
-  --lang    <lang>   rust | python | go | java | javascript | typescript
+  --config    <path>     config.hb のパス
+  --agent     <name>     openai | anthropic | mock
+  --api-key   <key>      API キー（省略時は .env を参照）
+  --model     <name>     gpt-4o / claude-3-5-sonnet-20241022 など
+  --lang      <lang>     rust | python | go | java | javascript | typescript
+  --verifier  <backend>  mock（デフォルト）| z3（要 z3-backend feature）
+
+OPTIONS（check）:
+  --verifier  <backend>  mock（デフォルト）| z3（要 z3-backend feature）
 
 設定優先順位:
   CLI 引数 > .hb ファイル内の指定 > config.hb > .env > 環境変数
 
 例:
   hb gen  test.hb
-  hb gen  test.hb --lang python
-  hb gen  test3.hb              # agent/lang を .hb から自動読み込み
-  hb ai   "Safely divide two integers." --agent mock
-  hb ai   "Validate an email." --agent openai --lang typescript
+  hb gen   test.hb --lang python
+  hb gen   test.hb --verifier z3 --lang rust   # Z3 で仕様を証明してからコード生成
+  hb gen   test3.hb              # agent/lang を .hb から自動読み込み
+  hb ai    "Safely divide two integers." --agent mock
+  hb ai    "Validate an email." --agent openai --lang typescript
   hb init
   hb check test.hb
+  hb check test.hb --verifier z3  # Z3 SMT で契約の整合性を厳密証明
+
+ビルド（Cargo features）:
+  cargo build                    # 最小（Mock のみ・Z3/AI なし）
+  cargo build --features ai      # OpenAI/Anthropic 連携
+  cargo build --features z3-backend   # Z3 SMT（--verifier z3）
+  cargo build --features full    # ai + z3-backend まとめて
 
 インストール:
-  cargo install hammurabi        # crates.io
-  cargo install --path .         # ローカル開発
+  cargo install --path . --features full
+  cargo install hammurabi --features full   # crates.io 公開後
 "#
     );
 }

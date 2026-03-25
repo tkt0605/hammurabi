@@ -38,15 +38,19 @@ crate-type = ["cdylib", "rlib"]
 # --------------------------------------------------------------------------
 # Features
 # --------------------------------------------------------------------------
-# `z3-backend` : Z3 SMT ソルバーを有効化（brew install z3 が必要）
+# `default` は空 — 外部ノードでは依存のない最小ビルドが可能。
+#
+# `ai`         : OpenAI / Anthropic API（hb gen / hb ai の AI 生成モード）
+# `z3-backend` : Z3 SMT ソルバー（--verifier z3、brew install z3 + ヘッダ/ライブラリが必要）
+# `full`       : ai + z3-backend をまとめて有効（ローカル開発向け）
 # `wasm`       : wasm-bindgen を有効化してブラウザ実行可能にする
-# `ai`         : OpenAI / Anthropic API クライアントを有効化
 # --------------------------------------------------------------------------
 [features]
-default    = ["ai"]
-z3-backend = ["z3"]
-wasm       = ["wasm-bindgen", "console_error_panic_hook"]
-ai         = ["dep:ureq"]
+default      = []
+full         = ["ai", "z3-backend"]
+z3-backend   = ["z3"]
+wasm         = ["wasm-bindgen", "console_error_panic_hook"]
+ai           = ["dep:ureq"]
 
 [dependencies]
 thiserror  = "1"
