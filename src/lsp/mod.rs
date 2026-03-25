@@ -477,7 +477,17 @@ fn forbidden_doc(fp: &ForbiddenPattern) -> &'static str {
 // ---------------------------------------------------------------------------
 
 /// 先頭のキーワードと残りに分割する。
+/// キーワードと残りの値に分割する。
+/// `key: value`、`key:value`、`key value` の 3 形式すべてを受け付ける。
 fn split_keyword(s: &str) -> (&str, &str) {
+    // `key: value` または `key:value` 形式（コロン区切り）を優先
+    if let Some((k, v)) = s.split_once(':') {
+        let kw   = k.trim();
+        let rest = v.trim();
+        // コロン後が空の場合（`goal:` のみの行）は空文字を返す
+        return (kw, rest);
+    }
+    // 旧来の `key value` 形式（スペース区切り）にフォールバック
     let mut iter = s.splitn(2, |c: char| c.is_whitespace());
     let kw   = iter.next().unwrap_or("");
     let rest = iter.next().map(|r| r.trim()).unwrap_or("");

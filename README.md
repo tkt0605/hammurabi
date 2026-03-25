@@ -41,6 +41,134 @@ Hammurabi は3つの原則（**憲法**）を持つ。
 
 ---
 
+## Getting Started
+
+### インストール
+
+```bash
+# crates.io からインストール（推奨）
+cargo install hammurabi
+
+# ローカル開発
+git clone https://github.com/hammurabi-lang/hammurabi.git
+cd hammurabi
+cargo install --path .
+```
+
+### プロジェクトの初期化
+
+```bash
+# config.hb と .env.example を自動生成
+hb init
+
+# API キーを設定
+cp .env.example .env
+# .env を編集して OPENAI_API_KEY または ANTHROPIC_API_KEY を入力
+```
+
+### Z3 バックエンドを有効化する場合
+
+```bash
+# macOS
+brew install z3
+
+cargo build --features z3-backend
+```
+
+---
+
+## CLI — `hb`
+
+### サブコマンド一覧
+
+```
+hb gen  <file.hb>   [OPTIONS]   .hb の契約から実装コードを生成
+hb ai   "<prompt>"  [OPTIONS]   AI でゴールを生成 → コード生成
+hb init [--force]               config.hb / .env.example を作成
+hb check <file.hb>              .hb ファイルの構文チェック（コード生成なし）
+```
+
+### 共通オプション（`gen` / `ai`）
+
+```
+--config  <path>   config.hb のパス（省略時はカレントディレクトリを自動検索）
+--agent   <name>   openai | anthropic | mock
+--api-key <key>    API キー（省略時は .env / 環境変数から自動解決）
+--model   <name>   gpt-4o / claude-3-5-sonnet-20241022 など
+--lang    <lang>   rust | python | go | java | javascript | typescript
+```
+
+### 設定の優先順位
+
+```
+CLI 引数  >  .hb ファイル内の指定  >  config.hb  >  .env  >  環境変数
+```
+
+### 使用例
+
+```bash
+# .hb ファイルからコード生成
+hb gen test.hb
+hb gen test.hb --lang python
+
+# AI でゴールを生成してコードを出力（Mock、API キー不要）
+hb ai "Safely divide two integers. Divisor must not be zero." --agent mock
+
+# AI でゴールを生成してコードを出力（OpenAI）
+hb ai "Validate an email address." --agent openai --lang typescript
+
+# 構文チェックのみ
+hb check test.hb
+
+# プロジェクト初期化（既存ファイルを上書きする場合は --force）
+hb init
+hb init --force
+```
+
+---
+
+## `.hb` ファイルフォーマット
+
+Hammurabi 専用の DSL。`ContractualGoal`（関数の論理仕様）を宣言的に記述する。
+
+```hb
+// ファイル設定（goal ブロックの前に記述）
+// agent:   openai              // openai | anthropic | mock
+// model:   gpt-4o              // 省略時はエージェントのデフォルト
+// lang:    python              // rust | python | go | java | javascript | typescript
+// api_key: $OPENAI_API_KEY    // API キー（.env 推奨）
+
+// goal ブロック（1 ファイルに複数定義可）
+goal: safe_division
+  require:   Or(InRange(divisor, -9223372036854775808, -1), InRange(divisor, 1, 9223372036854775807))
+  require:   InRange(dividend, -9223372036854775808, 9223372036854775807)
+  ensure:    result_is_finite
+  ensure:    result_within_i64_range
+  invariant: no_memory_aliasing
+  forbid:    RuntimeNullCheck
+  forbid:    UnprovenUnwrap
+```
+
+### 述語一覧
+
+| 述語 | 意味 |
+|------|------|
+| `NonNull(x)` | 変数 `x` が null でないこと |
+| `InRange(x, min, max)` | 変数 `x` が `[min, max]` の範囲内にあること |
+| `Or(p1, p2)` | 述語 `p1` または `p2` が成立すること |
+| `<atom>` | 任意のアトム述語（意味は Verifier が解釈） |
+
+### 禁止パターン（`forbid`）
+
+| パターン | 意味 |
+|----------|------|
+| `RuntimeNullCheck` | 実行時のヌルチェック（`if x == nil`）を禁止 |
+| `UnprovenUnwrap` | 証明なき `unwrap()` / `!` を禁止 |
+| `NonExhaustiveBranch` | 非網羅的な分岐を禁止 |
+| `CatchAllSuppression` | `_ =>` / catch-all による抑制を禁止 |
+
+---
+
 ## アーキテクチャ
 
 ```
@@ -57,12 +185,13 @@ hammurabi/
 │   │   └── client.rs         # OpenAI / Anthropic HTTP クライアント
 │   ├── config.rs             # config.hb / .env パーサー
 │   ├── lsp/
-│   │   └── mod.rs            # .hb パーサー + LSP 実装（補完・検証・ホバー）
+│   │   └── mod.rs            # .hb パーサー + LSP 実装（補完・診断・ホバー）
 │   ├── proof_store.rs        # ProofToken の永続化と署名検証
 │   ├── math.rs               # 数学的ユーティリティ
 │   └── wasm.rs               # WASM バインディング（feature: wasm）
 ├── src/bin/
-│   ├── run_hb.rs             # メイン CLI（コード生成 / AI ゴール生成）
+│   ├── hb.rs                 # メイン CLI（gen / ai / init / check）
+│   ├── run_hb.rs             # 旧 CLI（後方互換）
 │   └── hammurabi_lsp.rs      # LSP サーバーバイナリ
 ├── config.hb                 # AI エージェント設定ファイル
 ├── .env.example              # 環境変数テンプレート
@@ -71,83 +200,38 @@ hammurabi/
 
 ### データフロー
 
-#### モード 1：`.hb` ファイルからコード生成
+#### `hb gen` — `.hb` ファイルからコード生成
 
 ```
 [.hb ファイル]  goal ブロックを記述
     │
     ▼
 [LSP パーサー]  parse_hb() — .hb テキスト → Vec<ContractualGoal>
-    │
+    │  構文エラー → 警告 / エラーを表示して終了
     ▼
 [Verifier]  MockVerifier / Z3Verifier で制約を証明
-    │  証明失敗 → エラー（実行前に止まる）
-    ▼
-[CodeGenerator]  ContractualGoal → 各言語のコードスケルトン
     │
+    ▼
+[CodeWriter]  ContractualGoal → 各言語のコードスケルトン
+    │          agent が mock 以外の場合は AI が実装コードを生成
     ▼
 [出力]  Rust / Python / Go / Java / JavaScript / TypeScript
 ```
 
-#### モード 2：自然言語から AI ゴール生成
+#### `hb ai` — 自然言語から AI ゴール生成
 
 ```
 [自然言語の説明]  "Safely divide two integers."
     │
     ▼
 [AiGoalGenerator]  OpenAI / Anthropic / Mock
-    │  GPT-4o / Claude に .hb フォーマットで出力させる
-    ▼
-[.hb テキスト]  AI が生成した ContractualGoal の定義
-    │
+    │  AI が .hb フォーマットで ContractualGoal を出力
     ▼
 [LSP パーサー]  parse_hb() → Vec<ContractualGoal>
     │
     ▼
-[CodeGenerator]  多言語コードスケルトンとして出力
+[CodeWriter]  多言語コードスケルトン（または AI 実装コード）として出力
 ```
-
----
-
-## `.hb` ファイルフォーマット
-
-Hammurabi 専用の DSL（ドメイン固有言語）。`ContractualGoal` を宣言的に記述する。
-
-```
-// ファイル設定（goal ブロックの前に記述）
-agent   openai              // AI バックエンド: openai | anthropic | mock
-model   gpt-4o              // モデル名（省略時はエージェントのデフォルト）
-lang    rust                // 出力言語: rust | python | go | java | javascript | typescript
-// api_key $OPENAI_API_KEY  // API キー（.env 推奨）
-
-// goal ブロック（1 ファイルに複数定義可）
-goal safe_division
-require Or(InRange(divisor, -9223372036854775808, -1), InRange(divisor, 1, 9223372036854775807))
-require InRange(dividend, -9223372036854775808, 9223372036854775807)
-ensure result_is_finite
-ensure result_within_i64_range
-invariant no_memory_aliasing
-forbid RuntimeNullCheck
-forbid UnprovenUnwrap
-```
-
-### 述語一覧
-
-| 述語 | 意味 |
-|------|------|
-| `NonNull(x)` | 変数 `x` が null でないこと |
-| `InRange(x, min, max)` | 変数 `x` が `[min, max]` の範囲内にあること |
-| `Or(p1, p2)` | 述語 `p1` または `p2` が成立すること |
-| `<atom>` | 任意のアトム述語（意味は Z3 / Verifier が解釈） |
-
-### 禁止パターン（`forbid`）
-
-| パターン | 意味 |
-|----------|------|
-| `RuntimeNullCheck` | 実行時のヌルチェック（`if x == nil`）を禁止 |
-| `UnprovenUnwrap` | 証明なき `unwrap()` / `!` を禁止 |
-| `NonExhaustiveBranch` | 非網羅的な分岐を禁止 |
-| `CatchAllSuppression` | `_ =>` / catch-all による抑制を禁止 |
 
 ---
 
@@ -241,114 +325,15 @@ pub enum VerificationError {
 
 ---
 
-## Getting Started
-
-### 必須環境
-
-- Rust 1.70+（[インストール](https://rustup.rs/)）
-
-```bash
-git clone https://github.com/<your-account>/hammurabi.git
-cd hammurabi
-
-# デフォルトビルド（MockVerifier, Z3 不要）
-cargo build
-
-# テスト実行
-cargo test
-```
-
-### API キーの設定（AI 機能を使う場合）
-
-```bash
-cp .env.example .env
-# .env を編集して OPENAI_API_KEY または ANTHROPIC_API_KEY を設定
-```
-
-```bash
-# .env
-OPENAI_API_KEY=sk-proj-xxxxxxxxxxxxxxxxxxxxxxxxxxxx
-ANTHROPIC_API_KEY=sk-ant-xxxxxxxxxxxxxxxxxxxxxxxxxxxx
-```
-
-### Z3 本番バックエンドを有効化
-
-```bash
-# macOS
-brew install z3
-
-cargo build --features z3-backend
-```
-
----
-
-## CLI — `run_hb`
-
-### 1. `.hb` ファイルからコード生成
-
-```bash
-# デフォルト（.hb 内の lang 設定を使用）
-cargo run --bin run_hb -- test.hb
-
-# 言語オーバーライド
-cargo run --bin run_hb -- test.hb --lang python
-cargo run --bin run_hb -- test.hb --lang typescript
-```
-
-### 2. `config.hb` を使った AI ゴール生成
-
-```bash
-cargo run --features ai --bin run_hb -- \
-    --config config.hb \
-    --ai "Safely divide two integers. Divisor must not be zero."
-```
-
-### 3. CLI 引数で AI エージェントを直接指定
-
-```bash
-cargo run --features ai --bin run_hb -- \
-    --agent openai \
-    --api-key sk-proj-... \
-    --model gpt-4o \
-    --lang typescript \
-    --ai "Validate an email address."
-```
-
-### 4. Mock エージェント（API キー不要・開発用）
-
-```bash
-cargo run --bin run_hb -- \
-    --agent mock \
-    --ai "Compute the GCD of two non-negative integers."
-```
-
-### 優先順位
-
-```
-CLI 引数  >  .hb ファイル内設定  >  config.hb  >  デフォルト値
-```
-
----
-
-## LSP — `hammurabi_lsp`
-
-`.hb` ファイルに対して LSP（Language Server Protocol）の補完・診断・ホバーを提供するサーバー。
-
-```bash
-cargo build --bin hammurabi_lsp
-```
-
-対応するエディタ（VS Code など）に LSP サーバーとして登録することで、`.hb` ファイルの編集支援が有効になる。
-
----
-
 ## AI エージェント
 
-| エージェント | `--agent` | 必要なもの | 説明 |
-|-------------|-----------|------------|------|
-| `MockAiGenerator` | `mock` | なし | キーワード解析、オフライン動作（開発・テスト用） |
-| `OpenAiGenerator` | `openai` | `ai` feature + API キー | GPT-4o による ContractualGoal 生成 |
-| `AnthropicGenerator` | `anthropic` | `ai` feature + API キー | Claude による ContractualGoal 生成 |
+| エージェント | `--agent` | feature | 説明 |
+|-------------|-----------|---------|------|
+| `MockAiGenerator` | `mock` | 不要（デフォルト） | キーワード解析、オフライン動作（開発・テスト用） |
+| `OpenAiGenerator` | `openai` | `ai`（デフォルト有効） | GPT-4o による ContractualGoal 生成 |
+| `AnthropicGenerator` | `anthropic` | `ai`（デフォルト有効） | Claude による ContractualGoal 生成 |
+
+`ai` feature はデフォルトで有効です。API キーなしで使う場合は `--agent mock` を指定してください。
 
 ---
 
@@ -365,6 +350,18 @@ cargo build --bin hammurabi_lsp
 
 ---
 
+## LSP — `hammurabi_lsp`
+
+`.hb` ファイルに対して LSP（Language Server Protocol）の補完・診断・ホバーを提供するサーバー。
+
+```bash
+cargo build --bin hammurabi_lsp
+```
+
+対応するエディタ（VS Code など）に LSP サーバーとして登録することで、`.hb` ファイルの編集支援が有効になる。
+
+---
+
 ## ロードマップ
 
 | ステータス | 内容 |
@@ -378,11 +375,13 @@ cargo build --bin hammurabi_lsp
 | ✅ | `ContractualGoal` から多言語コードスケルトン自動生成（6言語対応） |
 | ✅ | `AiGoalGenerator` — 自然言語 → ContractualGoal（OpenAI / Anthropic / Mock） |
 | ✅ | `config.hb` / `.env` による設定管理 |
+| ✅ | `hb` CLI — サブコマンド構造（`gen` / `ai` / `init` / `check`） |
 | ✅ | LSP サーバー — `.hb` ファイルの補完・診断・ホバー |
 | ✅ | WASM ターゲットでのブラウザ実行（`wasm` feature） |
 | ⏳ | VS Code 拡張の公開 |
 | ⏳ | `ForAll` / `Exists` 量化述語の Z3 エンコード実装 |
 | ⏳ | 正規表現制約など新しい `Constraint` タイプ |
+| ⏳ | `crates.io` への公開 |
 
 ---
 

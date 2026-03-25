@@ -101,11 +101,11 @@ Given a natural language description, output a ContractualGoal in .hb format.
 
 ## .hb Format
 ```
-goal <snake_case_name>
-require <predicate>    # precondition (caller guarantees this)
-ensure  <predicate>    # postcondition (function guarantees this, at least 1 required)
-invariant <predicate>  # invariant (holds throughout execution)
-forbid <Pattern>       # forbidden pattern (optional)
+goal: <snake_case_name>
+  require:   <predicate>    # precondition (caller guarantees this)
+  ensure:    <predicate>    # postcondition (function guarantees this, at least 1 required)
+  invariant: <predicate>    # invariant (holds throughout execution)
+  forbid:    <Pattern>      # forbidden pattern (optional)
 ```
 
 ## Predicate Syntax
@@ -131,13 +131,13 @@ ImplicitCoercion     CatchAllSuppression
 ## Example
 Input: "Safely divide dividend by divisor. Divisor must not be zero."
 Output:
-goal safe_division
-require Or(InRange(divisor, -9223372036854775808, -1), InRange(divisor, 1, 9223372036854775807))
-require InRange(dividend, -9223372036854775808, 9223372036854775807)
-ensure result_is_finite
-invariant no_memory_aliasing
-forbid RuntimeNullCheck
-forbid UnprovenUnwrap
+goal: safe_division
+  require:   Or(InRange(divisor, -9223372036854775808, -1), InRange(divisor, 1, 9223372036854775807))
+  require:   InRange(dividend, -9223372036854775808, 9223372036854775807)
+  ensure:    result_is_finite
+  invariant: no_memory_aliasing
+  forbid:    RuntimeNullCheck
+  forbid:    UnprovenUnwrap
 "#
     }
 
@@ -167,7 +167,7 @@ impl AiGoalGenerator for MockAiGenerator {
 fn build_hb_from_keywords(desc: &str) -> String {
     let lower = desc.to_lowercase();
     let fn_name = infer_function_name(&lower);
-    let mut lines: Vec<String> = vec![format!("goal {fn_name}")];
+    let mut lines: Vec<String> = vec![format!("goal: {fn_name}")];
 
     // ── 変数候補を抽出 ────────────────────────────────────────────────
     let vars = extract_variable_names(&lower);
@@ -180,13 +180,13 @@ fn build_hb_from_keywords(desc: &str) -> String {
         || lower.contains("nullpointer")
     {
         for v in vars.iter().filter(|v| looks_like_ref(v)) {
-            lines.push(format!("require NonNull({v})"));
+            lines.push(format!("  require: NonNull({v})"));
         }
     }
 
     // ── 文字列/スライス引数は常に NonNull ────────────────────────────
     for v in vars.iter().filter(|v| is_string_like(v, &lower)) {
-        let entry = format!("require NonNull({v})");
+        let entry = format!("  require: NonNull({v})");
         if !lines.contains(&entry) {
             lines.push(entry);
         }
@@ -200,7 +200,7 @@ fn build_hb_from_keywords(desc: &str) -> String {
 
     if lower.contains("positive") || lower.contains("greater than zero") {
         for v in &numeric_vars {
-            lines.push(format!("require InRange({v}, 1, 9223372036854775807)"));
+            lines.push(format!("  require: InRange({v}, 1, 9223372036854775807)"));
         }
     } else if lower.contains("non-negative")
         || lower.contains("nonnegative")
@@ -208,20 +208,20 @@ fn build_hb_from_keywords(desc: &str) -> String {
         || lower.contains("zero or more")
     {
         for v in &numeric_vars {
-            lines.push(format!("require InRange({v}, 0, 9223372036854775807)"));
+            lines.push(format!("  require: InRange({v}, 0, 9223372036854775807)"));
         }
     } else if lower.contains("non-zero") || lower.contains("not zero") || lower.contains("nonzero") {
         for v in &numeric_vars {
             lines.push(format!(
-                "require Or(InRange({v}, -9223372036854775808, -1), \
-                              InRange({v}, 1, 9223372036854775807))"
+                "  require: Or(InRange({v}, -9223372036854775808, -1), \
+                               InRange({v}, 1, 9223372036854775807))"
             ));
         }
     } else {
         // 範囲制約なしでもデフォルトの全範囲を追加
         for v in &numeric_vars {
             lines.push(format!(
-                "require InRange({v}, -9223372036854775808, 9223372036854775807)"
+                "  require: InRange({v}, -9223372036854775808, 9223372036854775807)"
             ));
         }
     }
@@ -229,22 +229,22 @@ fn build_hb_from_keywords(desc: &str) -> String {
     // ── 事後条件 ──────────────────────────────────────────────────────
     let ensures = infer_postconditions(&lower, &fn_name);
     for e in ensures {
-        lines.push(format!("ensure {e}"));
+        lines.push(format!("  ensure: {e}"));
     }
 
     // ── 不変条件 ──────────────────────────────────────────────────────
     if lower.contains("thread") || lower.contains("concurrent") || lower.contains("parallel") {
-        lines.push("invariant thread_safe".into());
+        lines.push("  invariant: thread_safe".into());
     }
     if lower.contains("memory") || lower.contains("pointer") || lower.contains("reference") {
-        lines.push("invariant no_memory_aliasing".into());
+        lines.push("  invariant: no_memory_aliasing".into());
     }
 
     // ── 禁止パターン（常に追加） ─────────────────────────────────────
-    lines.push("forbid RuntimeNullCheck".into());
-    lines.push("forbid UnprovenUnwrap".into());
+    lines.push("  forbid: RuntimeNullCheck".into());
+    lines.push("  forbid: UnprovenUnwrap".into());
     if lower.contains("branch") || lower.contains("match") || lower.contains("exhaustive") {
-        lines.push("forbid NonExhaustiveBranch".into());
+        lines.push("  forbid: NonExhaustiveBranch".into());
     }
 
     lines.join("\n")
@@ -812,8 +812,8 @@ mod tests {
     fn mock_generates_forbidden_patterns() {
         let gen = MockAiGenerator;
         let out = gen.generate("Validate the email string.").unwrap();
-        assert!(out.raw_hb.contains("forbid RuntimeNullCheck"));
-        assert!(out.raw_hb.contains("forbid UnprovenUnwrap"));
+        assert!(out.raw_hb.contains("forbid: RuntimeNullCheck"));
+        assert!(out.raw_hb.contains("forbid: UnprovenUnwrap"));
     }
 
     #[test]
