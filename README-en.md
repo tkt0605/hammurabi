@@ -1,7 +1,9 @@
 # Hammurabi
 
 > **Logic over Implementation. Proof over Testing.**
+> ***The Constitution for AI, by AI, for AI."***
 > An AI-native language system that proves logic *before* you write code.
+> Hammurabi is not just a programming language; it's a mathematical proof for navigating uncertain times.
 
 [日本語 README](./README.md)
 
