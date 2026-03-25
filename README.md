@@ -1,6 +1,6 @@
 # Hammurabi
 
-> **Logic over Implementation. Proof over Testing.**
+> **実装よりも論理。テストよりも証明。**
 > ***「AIの、AIによる、AIのための憲法」***
 > hammurabiはただのプログラミング言語ではなく、不確かな時代をふるい分ける数学的な証明。
 > 「コードを書く」前に「論理を証明する」AI ネイティブ言語システム
