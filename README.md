@@ -3,6 +3,8 @@
 > **Logic over Implementation. Proof over Testing.**
 > 「コードを書く」前に「論理を証明する」AI ネイティブ言語システム
 
+[English README](./README-en.md)
+
 [![Rust](https://img.shields.io/badge/language-Rust-orange?logo=rust)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT-blue)](./LICENSE)
 [![Build](https://img.shields.io/badge/build-passing-brightgreen)](#getting-started)
