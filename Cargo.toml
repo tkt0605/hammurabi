@@ -4,6 +4,27 @@ version     = "0.1.0"
 edition     = "2021"
 description = "A logic-first AI-native language where correctness is proven, not tested"
 authors     = ["Hammurabi Language Team"]
+license     = "MIT"
+readme      = "README.md"
+repository  = "https://github.com/hammurabi-lang/hammurabi"
+homepage    = "https://github.com/hammurabi-lang/hammurabi"
+keywords    = ["logic", "codegen", "ai", "formal-verification", "contract"]
+categories  = ["development-tools", "command-line-utilities"]
+
+# --------------------------------------------------------------------------
+# バイナリターゲット
+# --------------------------------------------------------------------------
+[[bin]]
+name = "hb"
+path = "src/bin/hb.rs"
+
+[[bin]]
+name = "run_hb"
+path = "src/bin/run_hb.rs"
+
+[[bin]]
+name = "hammurabi_lsp"
+path = "src/bin/hammurabi_lsp.rs"
 
 # --------------------------------------------------------------------------
 # ライブラリターゲット
@@ -22,7 +43,7 @@ crate-type = ["cdylib", "rlib"]
 # `ai`         : OpenAI / Anthropic API クライアントを有効化
 # --------------------------------------------------------------------------
 [features]
-default    = []
+default    = ["ai"]
 z3-backend = ["z3"]
 wasm       = ["wasm-bindgen", "console_error_panic_hook"]
 ai         = ["dep:ureq"]
@@ -48,3 +69,8 @@ version  = "0.19"
 optional = true
 
 [dev-dependencies]
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

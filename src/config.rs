@@ -193,7 +193,14 @@ impl HammurabiConfig {
                 }
                 "api_key" | "apikey" | "api-key" => {
                     if !val.is_empty() {
-                        cfg.api_key = Some(val.to_owned());
+                        // `$ENV_VAR` 形式は環境変数として展開する
+                        let resolved = if val.starts_with('$') {
+                            let env_name = val.trim_start_matches('$');
+                            std::env::var(env_name).ok().filter(|v| !v.is_empty())
+                        } else {
+                            Some(val.to_owned())
+                        };
+                        cfg.api_key = resolved;
                     }
                 }
                 "model" => {

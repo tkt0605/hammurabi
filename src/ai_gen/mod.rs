@@ -302,11 +302,13 @@ fn infer_function_name(lower: &str) -> String {
         return "gcd".into();
     }
 
-    // フォールバック: 説明の最初の 2〜3 単語を使う
-    let words: Vec<&str> = lower
+    // フォールバック: 説明の最初の 2〜3 単語を使う（to_snake_case でサニタイズ）
+    let words: Vec<String> = lower
         .split_whitespace()
         .filter(|w| w.len() > 2 && !is_stopword(w))
         .take(2)
+        .map(|w| to_snake_case(w))
+        .filter(|w| !w.is_empty() && w != "_")
         .collect();
     if words.is_empty() {
         "my_function".into()
@@ -482,8 +484,8 @@ pub fn build_generator(
         AgentKind::OpenAi | AgentKind::Anthropic => {
             Err(AiGenError::Api {
                 message: format!(
-                    "{} を使うには `ai` feature を有効にしてください: \
-                     `cargo run --features ai --bin run_hb -- ...`",
+                    "{} を使うには `ai` feature 付きで再インストールしてください: \
+                     `cargo install --path . --features ai`",
                     cfg.agent.display_name()
                 ),
             })
@@ -707,8 +709,8 @@ pub fn build_code_writer(
         AgentKind::OpenAi | AgentKind::Anthropic => {
             Err(AiGenError::Api {
                 message: format!(
-                    "{} を使うには `ai` feature を有効にしてください: \
-                     `cargo run --features ai --bin run_hb -- ...`",
+                    "{} を使うには `ai` feature 付きで再インストールしてください: \
+                     `cargo install --path . --features ai`",
                     cfg.agent.display_name()
                 ),
             })
