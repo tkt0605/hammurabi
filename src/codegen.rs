@@ -278,10 +278,16 @@ impl CodeGenerator {
         for fp in &goal.forbidden { push!(buf, "    // ✗ {fp}\n"); }
         push!(buf, "\n");
 
-        // TODO
-        if ensures.is_empty() {
+        // When ブロック（条件付き事後条件）
+        let when_block = render_when_postconds(goal, &TargetLang::Rust, "    ");
+        if !when_block.is_empty() {
+            push!(buf, "{when_block}\n");
+        }
+
+        // 通常の事後条件 TODO
+        if ensures.is_empty() && when_block.is_empty() {
             push!(buf, "    todo!(\"Implement {fn_name}\")\n");
-        } else {
+        } else if !ensures.is_empty() {
             push!(buf, "    // TODO: Postconditions を満たす実装を書いてください\n");
             for e in &ensures { push!(buf, "    // ensure: {e}\n"); }
             push!(buf, "    todo!(\"Implement {fn_name}: ensure {}\")\n", ensures[0]);
@@ -339,10 +345,16 @@ impl CodeGenerator {
             push!(buf, "\n");
         }
 
-        // TODO
-        if ensures.is_empty() {
+        // When ブロック（条件付き事後条件）
+        let when_block = render_when_postconds(goal, &TargetLang::Python, "    ");
+        if !when_block.is_empty() {
+            push!(buf, "{when_block}\n");
+        }
+
+        // 通常の事後条件 TODO
+        if ensures.is_empty() && when_block.is_empty() {
             push!(buf, "    raise NotImplementedError(\"Implement {fn_name}\")\n");
-        } else {
+        } else if !ensures.is_empty() {
             push!(buf, "    # TODO: Postconditions を満たす実装を書いてください\n");
             for e in &ensures { push!(buf, "    # ensure: {e}\n"); }
             push!(buf, "    raise NotImplementedError(\"Implement {fn_name}: ensure {}\")\n", ensures[0]);
@@ -400,10 +412,16 @@ impl CodeGenerator {
             push!(buf, "\n");
         }
 
-        // TODO
-        if ensures.is_empty() {
+        // When ブロック（条件付き事後条件）
+        let when_block = render_when_postconds(goal, &TargetLang::Go, "\t");
+        if !when_block.is_empty() {
+            push!(buf, "{when_block}\n");
+        }
+
+        // 通常の事後条件 TODO
+        if ensures.is_empty() && when_block.is_empty() {
             push!(buf, "\tpanic(\"implement {fn_name}\")\n");
-        } else {
+        } else if !ensures.is_empty() {
             push!(buf, "\t// TODO: Postconditions を満たす実装を書いてください\n");
             for e in &ensures { push!(buf, "\t// ensure: {e}\n"); }
             push!(buf, "\tpanic(\"implement {fn_name}: ensure {}\")\n", ensures[0]);
@@ -466,10 +484,16 @@ impl CodeGenerator {
             push!(buf, "\n");
         }
 
-        // TODO
-        if ensures.is_empty() {
+        // When ブロック（条件付き事後条件）
+        let when_block = render_when_postconds(goal, &TargetLang::Java, "        ");
+        if !when_block.is_empty() {
+            push!(buf, "{when_block}\n");
+        }
+
+        // 通常の事後条件 TODO
+        if ensures.is_empty() && when_block.is_empty() {
             push!(buf, "        throw new UnsupportedOperationException(\"Implement {fn_name}\");\n");
-        } else {
+        } else if !ensures.is_empty() {
             push!(buf, "        // TODO: Postconditions を満たす実装を書いてください\n");
             for e in &ensures { push!(buf, "        // ensure: {e}\n"); }
             push!(buf, "        throw new UnsupportedOperationException(\n");
@@ -516,10 +540,16 @@ impl CodeGenerator {
             push!(buf, "\n");
         }
 
-        // TODO
-        if ensures.is_empty() {
+        // When ブロック（条件付き事後条件）
+        let when_block = render_when_postconds(goal, &TargetLang::JavaScript, "  ");
+        if !when_block.is_empty() {
+            push!(buf, "{when_block}\n");
+        }
+
+        // 通常の事後条件 TODO
+        if ensures.is_empty() && when_block.is_empty() {
             push!(buf, "  throw new Error('Implement {fn_name}');\n");
-        } else {
+        } else if !ensures.is_empty() {
             push!(buf, "  // TODO: Postconditions を満たす実装を書いてください\n");
             for e in &ensures { push!(buf, "  // ensure: {e}\n"); }
             push!(buf, "  throw new Error('Implement {fn_name}: ensure {}');\n", ensures[0]);
@@ -566,10 +596,16 @@ impl CodeGenerator {
             push!(buf, "\n");
         }
 
-        // TODO
-        if ensures.is_empty() {
+        // When ブロック（条件付き事後条件）
+        let when_block = render_when_postconds(goal, &TargetLang::TypeScript, "  ");
+        if !when_block.is_empty() {
+            push!(buf, "{when_block}\n");
+        }
+
+        // 通常の事後条件 TODO
+        if ensures.is_empty() && when_block.is_empty() {
             push!(buf, "  throw new Error('Implement {fn_name}');\n");
-        } else {
+        } else if !ensures.is_empty() {
             push!(buf, "  // TODO: Postconditions を満たす実装を書いてください\n");
             for e in &ensures { push!(buf, "  // ensure: {e}\n"); }
             push!(buf, "  throw new Error('Implement {fn_name}: ensure {}');\n", ensures[0]);
@@ -761,9 +797,169 @@ fn extract_i64(s: &str, key: &str) -> Option<i64> {
     trimmed.parse().ok()
 }
 
-/// 事後条件の文字列リストを返す。
+// ---------------------------------------------------------------------------
+// predicate_to_expr — Predicate を言語別ランタイム式に変換
+// ---------------------------------------------------------------------------
+
+/// `Predicate` を指定言語のブール式文字列に変換する。
+/// `When(cond, cons)` の条件節・帰結節をコード生成するために使う。
+pub fn predicate_to_expr(pred: &Predicate, lang: &TargetLang) -> String {
+    match pred {
+        Predicate::True  => match lang {
+            TargetLang::Python => "True".into(),
+            _ => "true".into(),
+        },
+        Predicate::False => match lang {
+            TargetLang::Python => "False".into(),
+            _ => "false".into(),
+        },
+        Predicate::Atom(s) => s.clone(),
+
+        Predicate::InRange { var, min, max } => match lang {
+            TargetLang::Python =>
+                format!("{min} <= {var} <= {max}"),
+            _ =>
+                format!("{var} >= {min} && {var} <= {max}"),
+        },
+
+        Predicate::NonNull(var) => match lang {
+            TargetLang::Rust       => format!("{var}.is_some()"),
+            TargetLang::Python     => format!("{var} is not None"),
+            TargetLang::Go         => format!("{var} != nil"),
+            TargetLang::Java       => format!("{var} != null"),
+            TargetLang::JavaScript |
+            TargetLang::TypeScript => format!("{var} !== null && {var} !== undefined"),
+        },
+
+        Predicate::Equals(a, b) => match lang {
+            TargetLang::JavaScript |
+            TargetLang::TypeScript => format!("{a} === {b}"),
+            _ => format!("{a} == {b}"),
+        },
+
+        Predicate::Not(p) => {
+            let inner = predicate_to_expr(p, lang);
+            match lang {
+                TargetLang::Python => format!("not ({inner})"),
+                _ => format!("!({inner})"),
+            }
+        },
+
+        Predicate::And(l, r) => {
+            let le = predicate_to_expr(l, lang);
+            let re = predicate_to_expr(r, lang);
+            match lang {
+                TargetLang::Python => format!("({le} and {re})"),
+                _ => format!("({le} && {re})"),
+            }
+        },
+
+        Predicate::Or(l, r) => {
+            let le = predicate_to_expr(l, lang);
+            let re = predicate_to_expr(r, lang);
+            match lang {
+                TargetLang::Python => format!("({le} or {re})"),
+                _ => format!("({le} || {re})"),
+            }
+        },
+
+        // Implies をネストで使う場合: !(cond) || cons
+        Predicate::Implies(cond, cons) => {
+            let ce = predicate_to_expr(cond, lang);
+            let ke = predicate_to_expr(cons, lang);
+            match lang {
+                TargetLang::Python => format!("(not ({ce}) or {ke})"),
+                _ => format!("(!({ce}) || {ke})"),
+            }
+        },
+
+        Predicate::ForAll { var, body } => {
+            let be = predicate_to_expr(body, lang);
+            format!("/* ∀{var}. {be} */")
+        },
+        Predicate::Exists { var, body } => {
+            let be = predicate_to_expr(body, lang);
+            format!("/* ∃{var}. {be} */")
+        },
+    }
+}
+
+// ---------------------------------------------------------------------------
+// render_when_postconds — When ブロックのコード出力
+// ---------------------------------------------------------------------------
+
+/// 事後条件の中から `Implies(cond, cons)` を抽出し、言語別の条件付きブロックを生成する。
+/// `When` なしの goal では空文字列を返す。
+fn render_when_postconds(goal: &ContractualGoal, lang: &TargetLang, indent: &str) -> String {
+    let when_posts: Vec<(&Predicate, &Predicate)> = goal.postconditions
+        .iter()
+        .filter_map(|p| {
+            if let Predicate::Implies(cond, cons) = p {
+                Some((cond.as_ref(), cons.as_ref()))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if when_posts.is_empty() {
+        return String::new();
+    }
+
+    let mut buf = String::new();
+    push!(buf, "{indent}// ── When: 条件付き事後条件 ────────────────────────────────\n");
+
+    for (cond, cons) in &when_posts {
+        let cond_expr = predicate_to_expr(cond, lang);
+        let cons_str  = cons.to_string();
+
+        match lang {
+            TargetLang::Python => {
+                push!(buf, "{indent}if {cond_expr}:\n");
+                push!(buf, "{indent}    # TODO: ensure {cons_str}\n");
+                push!(buf, "{indent}    raise NotImplementedError(\"ensure {cons_str}\")\n");
+            }
+            TargetLang::Go => {
+                push!(buf, "{indent}if {cond_expr} {{\n");
+                push!(buf, "{indent}\t// TODO: ensure {cons_str}\n");
+                push!(buf, "{indent}\treturn 0, fmt.Errorf(\"not implemented: ensure {cons_str}\")\n");
+                push!(buf, "{indent}}}\n");
+            }
+            TargetLang::Java => {
+                push!(buf, "{indent}if ({cond_expr}) {{\n");
+                push!(buf, "{indent}    // TODO: ensure {cons_str}\n");
+                push!(buf, "{indent}    throw new UnsupportedOperationException(\"ensure {cons_str}\");\n");
+                push!(buf, "{indent}}}\n");
+            }
+            TargetLang::JavaScript | TargetLang::TypeScript => {
+                push!(buf, "{indent}if ({cond_expr}) {{\n");
+                push!(buf, "{indent}  // TODO: ensure {cons_str}\n");
+                push!(buf, "{indent}  throw new Error('not implemented: ensure {cons_str}');\n");
+                push!(buf, "{indent}}}\n");
+            }
+            TargetLang::Rust => {
+                push!(buf, "{indent}if {cond_expr} {{\n");
+                push!(buf, "{indent}    // TODO: ensure {cons_str}\n");
+                push!(buf, "{indent}    todo!(\"ensure {cons_str}\")\n");
+                push!(buf, "{indent}}}\n");
+            }
+        }
+    }
+    buf
+}
+
+// ---------------------------------------------------------------------------
+// postcond_strings — 非 When 事後条件のみを文字列化
+// ---------------------------------------------------------------------------
+
+/// 事後条件のうち `Implies`（When）以外を文字列リストで返す。
+/// `When` ブロックは `render_when_postconds` が担当するため除外する。
 fn postcond_strings(goal: &ContractualGoal) -> Vec<String> {
-    goal.postconditions.iter().map(|p| p.to_string()).collect()
+    goal.postconditions
+        .iter()
+        .filter(|p| !matches!(p, Predicate::Implies(_, _)))
+        .map(|p| p.to_string())
+        .collect()
 }
 
 /// `ForbiddenPattern` の日本語説明を返す。

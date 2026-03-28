@@ -421,6 +421,30 @@ fn parse_predicate(s: &str) -> Result<Predicate, String> {
         }
         return Err("Or( の引数を2つに分割できませんでした".into());
     }
+    // Equals(a, b) — 等値制約
+    if s.starts_with("Equals(") && s.ends_with(')') {
+        let inner = &s["Equals(".len()..s.len() - 1];
+        if let Some(mid) = find_top_level_comma(inner) {
+            let a = inner[..mid].trim();
+            let b = inner[mid + 1..].trim();
+            if a.is_empty() || b.is_empty() {
+                return Err("Equals の引数が空です（例: `Equals(x, 0)` または `Equals(a, b)`）".into());
+            }
+            return Ok(Predicate::Equals(a.to_owned(), b.to_owned()));
+        }
+        return Err("Equals には 2 つの引数が必要です（例: `Equals(divisor, 0)`）".into());
+    }
+
+    // When(cond, consequence) — Implies のシンタックスシュガー
+    if s.starts_with("When(") && s.ends_with(')') {
+        let inner = &s["When(".len()..s.len() - 1];
+        if let Some(mid) = find_top_level_comma(inner) {
+            let cond = parse_predicate(&inner[..mid])?;
+            let cons = parse_predicate(&inner[mid + 1..])?;
+            return Ok(Predicate::implies(cond, cons));
+        }
+        return Err("When( には 2 つの引数が必要です（例: `When(InRange(x, 1, 100), result_ok)`）".into());
+    }
 
     // ベアアトム: 英数字 + アンダースコアのみ
     if !s.is_empty() && s.chars().all(|c| c.is_alphanumeric() || c == '_') {
@@ -429,7 +453,8 @@ fn parse_predicate(s: &str) -> Result<Predicate, String> {
 
     Err(format!(
         "述語 `{s}` を解析できません\n\
-         使用例: `NonNull(var)`, `InRange(var, min, max)`, `atom_name`, `Not(pred)`, `And(p1, p2)`"
+         使用例: `NonNull(var)`, `InRange(var, min, max)`, `atom_name`,\n\
+         `Not(pred)`, `And(p1, p2)`, `Or(p1, p2)`, `When(cond, consequence)`"
     ))
 }
 
