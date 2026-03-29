@@ -21,6 +21,12 @@
 //!
 //! ファイル先頭の `agent` / `api_key` / `model` / `lang` はファイル全体に適用される。
 //! 1 ファイルに複数の `goal` ブロックを記述できる。
+//!
+//! ## ブロック構文（v2）
+//! 最外殻の `{ config, define { context?, goal, settings }, ... }` を同一ファイルに混在可能。
+//! `define` 内の `context` は設計・査定の意図（任意）。`[]` や `-` 箇条書きで並列意図を書きやすい。詳細は [`brace`] モジュール。
+
+mod brace;
 
 use crate::lang::goal::{ContractualGoal, ForbiddenPattern, Predicate};
 use crate::codegen::TargetLang;
@@ -79,6 +85,8 @@ pub struct ParsedGoal {
     pub goal:      ContractualGoal,
     pub name_span: Span,
     pub items:     Vec<ParsedItem>,
+    /// `define: { context: ... }` で与えた設計意図・査定用の文脈（行ベース goal では常に `None`）
+    pub context:   Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -123,7 +131,28 @@ pub struct ParseResult {
 
 /// `.hb` テキストを解析し、`ParseResult` を返す。
 /// エラーが含まれていても可能な限りパースを継続する（寛容なパーサ）。
+///
+/// 行ベース構文に加え、ファイル内の最外殻 `{ ... }` ブロックを
+/// [`brace::parse_brace_block`] で解釈し、得られた `goal` 群（複数 `define` 可）と `config` をマージする。
 pub fn parse_hb(text: &str) -> ParseResult {
+    let ranges = brace::find_outer_brace_ranges(text);
+    let masked = brace::mask_brace_ranges(text, &ranges);
+    let mut result = parse_hb_line_based(&masked);
+
+    for range in ranges {
+        match brace::parse_brace_block(text, range) {
+            Ok((meta, goals)) => {
+                brace::merge_brace_meta_into_result(&mut result, meta);
+                result.goals.extend(goals);
+            }
+            Err(mut errs) => result.errors.append(&mut errs),
+        }
+    }
+
+    result
+}
+
+fn parse_hb_line_based(text: &str) -> ParseResult {
     let mut goals:      Vec<ParsedGoal>    = Vec::new();
     let mut errors:     Vec<ParseError>    = Vec::new();
     let mut current:    Option<ParsedGoal> = None;
@@ -252,6 +281,7 @@ pub fn parse_hb(text: &str) -> ParseResult {
                         goal:      ContractualGoal::new(name),
                         name_span: Span::new(line_no, col, col + name.len() as u32),
                         items:     Vec::new(),
+                        context:   None,
                     });
                 }
             }
@@ -368,7 +398,7 @@ pub fn parse_hb(text: &str) -> ParseResult {
 // 述語パーサ
 // ---------------------------------------------------------------------------
 
-fn parse_predicate(s: &str) -> Result<Predicate, String> {
+pub(crate) fn parse_predicate(s: &str) -> Result<Predicate, String> {
     let s = s.trim();
 
     if s.starts_with("NonNull(") && s.ends_with(')') {
@@ -472,7 +502,7 @@ fn find_top_level_comma(s: &str) -> Option<usize> {
     None
 }
 
-fn parse_forbidden(s: &str) -> Result<ForbiddenPattern, String> {
+pub(crate) fn parse_forbidden(s: &str) -> Result<ForbiddenPattern, String> {
     match s.trim() {
         "NonExhaustiveBranch" => Ok(ForbiddenPattern::NonExhaustiveBranch),
         "RuntimeNullCheck"    => Ok(ForbiddenPattern::RuntimeNullCheck),

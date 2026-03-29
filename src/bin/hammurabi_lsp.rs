@@ -263,10 +263,16 @@ fn validate(text: &str) -> Vec<Diagnostic> {
 fn compute_hover(text: &str, pos: Position) -> Option<Hover> {
     let ParseResult { goals, .. } = parse_hb(text);
 
-    for ParsedGoal { goal, name_span, items } in &goals {
+    for ParsedGoal {
+        goal,
+        name_span,
+        items,
+        context,
+    } in &goals
+    {
         // ゴール名をホバー → ContractualGoal のサマリを表示
         if span_contains(name_span, pos) {
-            let md = format!(
+            let mut md = format!(
                 "## ContractualGoal: `{}`\n\n\
                  | 種別 | 数 |\n|------|----|\n\
                  | Preconditions  | {} |\n\
@@ -279,6 +285,11 @@ fn compute_hover(text: &str, pos: Position) -> Option<Hover> {
                 goal.invariants.len(),
                 goal.forbidden.len(),
             );
+            if let Some(ctx) = context.as_ref().filter(|s| !s.trim().is_empty()) {
+                md.push_str("\n### 設計コンテキスト（define）\n\n");
+                md.push_str(ctx);
+                md.push('\n');
+            }
             return Some(Hover {
                 contents: HoverContents::Markup(MarkupContent {
                     kind:  MarkupKind::Markdown,
