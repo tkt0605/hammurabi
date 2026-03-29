@@ -164,23 +164,33 @@ cargo install --path . --features full # Example: full local install
 A small DSL for Hammurabi. Declaratively describes `ContractualGoal` (logical specification of a function).
 
 ```hb
-// File-level settings (before goal blocks)
+// File-level settings（Before Define Block）
 // agent:   openai              // openai | anthropic | mock
 // model:   gpt-4o              // default per agent if omitted
 // lang:    python              // rust | python | go | java | javascript | typescript
 // api_key: $OPENAI_API_KEY    // prefer .env
 
-// Goal block (multiple per file allowed)
-goal: safe_division
-  require:   Or(InRange(divisor, -9223372036854775808, -1), InRange(divisor, 1, 9223372036854775807))
-  require:   InRange(dividend, -9223372036854775808, 9223372036854775807)
-  ensure:    result_is_finite
-  ensure:    result_within_i64_range
-  invariant: no_memory_aliasing
-  forbid:    RuntimeNullCheck
-  forbid:    UnprovenUnwrap
+// Define Block（Detailed information about what you will be making is listed here.）
+{
+    define: {
+        // When using an agent, please include detailed design information here. Bullet points are acceptable.
+        context: [
+            - <Context01>
+            - <Context02>
+        ]
+        goal: <Write down what you want to create (currently a function).>
+        settings: [
+            require:   Or(InRange(divisor, -9223372036854775808, -1), InRange(divisor, 1, 9223372036854775807))
+            require:   InRange(dividend, -9223372036854775808, 9223372036854775807)
+            ensure:    result_is_finite
+            ensure:    result_within_i64_range
+            invariant: no_memory_aliasing
+            forbid:    RuntimeNullCheck
+            forbid:    UnprovenUnwrap
+        ]
+    }
+}
 ```
-
 ### Predicates
 
 | Predicate | Meaning |
