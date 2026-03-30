@@ -120,8 +120,10 @@ hb check test.hb --verifier mock
 ### 設定の優先順位
 
 ```
-CLI 引数  >  config.hb  >  .hb ファイル内の指定（未指定項目のみ補完）  >  .env  >  環境変数
+CLI 引数  >  .hb ファイル内の指定  >  config.hb  >  .env  >  環境変数
 ```
+
+`hb gen` では `.hb` に `lang` 行が無い場合、パーサのデフォルト（Rust）で config.hb の `lang` を上書きしません。
 
 ### 使用例
 
@@ -165,6 +167,8 @@ cargo install --path . --features full  # ローカルにフル機能で入れ�
 
 Hammurabi 専用の DSL。`ContractualGoal`（関数の論理仕様）を宣言的に記述する。
 
+行の `//` 以降はコメントとして扱います。**`https://` のように `//` を含む URL を文中に書くときはバッククォート** `` `https://...` `` **で囲んでください**（囲まないと `//` 以降がコメント扱いになります）。
+
 ```hb
 // ファイル設定（goal ブロックの前に記述）
 // agent:   openai              // openai | anthropic | mock
@@ -173,6 +177,13 @@ Hammurabi 専用の DSL。`ContractualGoal`（関数の論理仕様）を宣言�
 // api_key: $OPENAI_API_KEY    // API キー（.env 推奨）
 
 {
+  //　*.hbにも設定を記入可能
+  config: {
+    agent  : openai
+    model  : gpt-4o
+    api_key: $OPENAI_API_KEY
+    lang   : python
+  }
   // ── 自然言語 goal + 型 + examples ─────────────────────
   define: {
     id:    safe_divide_v1

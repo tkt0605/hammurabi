@@ -119,8 +119,10 @@ hb check test.hb --verifier mock
 ### Configuration precedence
 
 ```
-CLI args  >  config.hb  >  settings inside .hb (fallback for unset fields)  >  .env  >  environment variables
+CLI args  >  settings inside .hb  >  config.hb  >  .env  >  environment variables
 ```
+
+For `hb gen`, if the `.hb` file has no `lang` line, the parser default (Rust) does not override `lang` from `config.hb`.
 
 ### Examples
 
@@ -164,6 +166,8 @@ cargo install --path . --features full # Example: full local install
 
 A small DSL for Hammurabi. Declaratively describes `ContractualGoal` (logical specification of a function).
 
+Everything after `//` on a line is treated as a comment. **To embed a URL that contains `//` (e.g. `https://...`), wrap it in backticks** like `` `https://...` `` — otherwise the first `//` starts a comment and the rest of the line is dropped.
+
 ```hb
 // File-level settings (before define blocks)
 // agent:   openai              // openai | anthropic | mock
@@ -172,6 +176,13 @@ A small DSL for Hammurabi. Declaratively describes `ContractualGoal` (logical sp
 // api_key: $OPENAI_API_KEY    // prefer .env
 
 {
+  // Settings can also be entered in *.hb files.
+  config: {
+    agent: openai
+    model: gpt-4o
+    api_key: $OPENAI_API_KEY
+    lang: python
+  }
   // ── Natural-language goal + typed I/O + examples ──────
   define: {
     id:    safe_divide_v1

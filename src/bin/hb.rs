@@ -324,8 +324,9 @@ fn print_verification_report(report: &ConstitutionalReport) {
 // 設定ロード
 // ---------------------------------------------------------------------------
 
-fn load_config(opts: &CommonOpts) -> HammurabiConfig {
-    let mut cfg = if let Some(ref path) = opts.config {
+/// `config.hb`（または `--config`）のみ。CLI オーバーライドは含まない。
+fn load_disk_config(opts: &CommonOpts) -> HammurabiConfig {
+    if let Some(ref path) = opts.config {
         HammurabiConfig::from_file(path).unwrap_or_else(|e| {
             eprintln!("config ファイル読み込みエラー: {e}");
             process::exit(1);
@@ -337,8 +338,11 @@ fn load_config(opts: &CommonOpts) -> HammurabiConfig {
         })
     } else {
         HammurabiConfig::default()
-    };
+    }
+}
 
+fn load_config(opts: &CommonOpts) -> HammurabiConfig {
+    let mut cfg = load_disk_config(opts);
     cfg.apply_overrides(
         opts.agent.clone(),
         opts.api_key.clone(),
@@ -377,14 +381,11 @@ fn main() {
 // ---------------------------------------------------------------------------
 
 fn cmd_gen(path: &str, opts: &CommonOpts) {
-    let cfg = load_config(opts);
-
     let text = fs::read_to_string(path).unwrap_or_else(|e| {
         eprintln!("ファイル読み込みエラー: {path}: {e}");
         process::exit(1);
     });
 
-    print_banner("gen", &cfg);
     println!("  ファイル: {path}\n");
 
     let result = parse_hb(&text);
@@ -407,21 +408,30 @@ fn cmd_gen(path: &str, opts: &CommonOpts) {
         process::exit(1);
     }
 
-    // .hb の設定をマージ（CLI > .hb > config.hb の優先順位）
-    let mut effective_cfg = cfg.clone();
-    if effective_cfg.agent == AgentKind::Mock {
-        if let Some(a) = result.agent { effective_cfg.agent = a; }
+    // 優先順位: config.hb → .hb ファイル内 → CLI（最後に apply_overrides）
+    let mut effective_cfg = load_disk_config(opts);
+    if let Some(a) = result.agent {
+        effective_cfg.agent = a;
     }
-    if effective_cfg.api_key.is_none() {
-        if let Some(k) = result.api_key { effective_cfg.api_key = Some(k); }
+    if let Some(k) = result.api_key.clone() {
+        effective_cfg.api_key = Some(k);
     }
-    if effective_cfg.model.is_none() {
-        if let Some(m) = result.model { effective_cfg.model = Some(m); }
+    if let Some(m) = result.model.clone() {
+        effective_cfg.model = Some(m);
     }
+    if result.lang_specified {
+        effective_cfg.lang = result.lang;
+    }
+    effective_cfg.apply_overrides(
+        opts.agent.clone(),
+        opts.api_key.clone(),
+        opts.model.clone(),
+        opts.lang.clone(),
+    );
 
-    let lang = opts.lang.clone()
-        .or_else(|| if cfg.lang != TargetLang::Rust { Some(cfg.lang.clone()) } else { None })
-        .unwrap_or(result.lang);
+    let lang = effective_cfg.lang.clone();
+
+    print_banner("gen", &effective_cfg);
 
     let use_ai = effective_cfg.agent != AgentKind::Mock;
     let has_nl_goals = result.goals.iter().any(|pg| pg.needs_ai);
@@ -660,7 +670,7 @@ fn cmd_init(force: bool) {
         "config.hb",
         force,
         r#"# config.hb — Hammurabi デフォルト設定
-# CLI 引数 > .hb ファイル > ここの設定 の優先順位
+# 優先順位: CLI 引数 > .hb ファイル > ここ（config.hb）
 
 agent: mock          # openai | anthropic | mock
 # api_key: $OPENAI_API_KEY

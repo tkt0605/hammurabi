@@ -380,6 +380,15 @@ pub mod z3_backend {
 
         /// `Predicate` AST を z3 0.19 の `Bool` に変換する。
         /// コンテキスト引数は不要（グローバルコンテキストを使用）。
+        /// `Equals` の片側が整数リテラルなら Z3 の整数定数にし、そうでなければ整数シンボルとする。
+        fn int_from_name_or_literal(s: &str) -> Int {
+            if let Ok(n) = s.trim().parse::<i64>() {
+                Int::from_i64(n)
+            } else {
+                Int::new_const(s)
+            }
+        }
+
         fn predicate_to_bool(pred: &Predicate) -> Bool {
             match pred {
                 Predicate::True  => Bool::from_bool(true),
@@ -415,8 +424,9 @@ pub mod z3_backend {
                     Bool::new_const(format!("NonNull_{var}").as_str())
                 }
                 Predicate::Equals(a, b) => {
-                    let x = Int::new_const(a.as_str());
-                    let y = Int::new_const(b.as_str());
+                    // `Equals(x, 0)` → x = 0（定数）。`Equals(x, y)` → 二変数の等値。
+                    let x = Self::int_from_name_or_literal(a.as_str());
+                    let y = Self::int_from_name_or_literal(b.as_str());
                     x.eq(&y)
                 }
                 // ∀var. body — 全称量化

@@ -306,12 +306,13 @@ fn collect_pred(pred: &Predicate, vars: &mut Vec<VarInfo>) {
         Predicate::ForAll { body, .. } | Predicate::Exists { body, .. } => {
             collect_pred(body, vars);
         }
-        // Regex(var, pattern) — Constraint::Regex にマップ
+        // Regex(var, pattern) — Constraint::Regex にマップ（gen_rust の vec![...] に直挿入）
+        // `r"..."` は `"` を含むパターンで壊れるため、Rust 文字列リテラルは Debug エスケープで埋め込む
         Predicate::Regex { var, pattern } => {
             upsert(
                 vars,
                 var,
-                format!("Constraint::Regex {{ pattern: r\"{pattern}\".into() }}"),
+                format!("Constraint::Regex {{ pattern: {:?}.into() }}", pattern),
             );
         }
         // Atom / True / False は変数を持たない
@@ -1048,6 +1049,17 @@ fn extract_i64(s: &str, key: &str) -> Option<i64> {
     trimmed.parse().ok()
 }
 
+pub fn escape_for_lang(pattern: &str, lang: &TargetLang) -> String {
+    match lang {
+        TargetLang::Rust => pattern.replace('\\', "\\\\"),
+        TargetLang::Python => pattern.replace('"', "\\\""),
+        TargetLang::Go => pattern.replace('`', "` + \"`\" + `"),
+        TargetLang::Java => pattern.replace('\\', "\\\\").replace('"', "\\\""),
+        TargetLang::JavaScript => pattern.replace('\\', "\\\\"),
+        TargetLang::TypeScript => pattern.replace('"', "\\\""),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // predicate_to_expr — Predicate を言語別ランタイム式に変換
 // ---------------------------------------------------------------------------
@@ -1134,18 +1146,31 @@ pub fn predicate_to_expr(pred: &Predicate, lang: &TargetLang) -> String {
         },
 
         Predicate::Regex { var, pattern } => match lang {
-            TargetLang::Rust =>
-                format!("Regex::new(r\"{pattern}\").unwrap().is_match(&{var})"),
-            TargetLang::Python =>
-                format!("bool(re.fullmatch(r\"{pattern}\", {var}))"),
-            TargetLang::Go =>
-                format!("regexp.MustCompile(`{pattern}`).MatchString({var})"),
-            TargetLang::Java =>
-                format!("{var}.matches(\"{pattern}\")"),
-            TargetLang::JavaScript =>
-                format!("/{pattern}/.test({var})"),
-            TargetLang::TypeScript =>
-                format!("/{pattern}/.test({var})"),
+            // Rust: パターンは {:?} でエスケープ。生成される if 条件では `?` が使えないため Result は map で bool に潰す
+            TargetLang::Rust => format!(
+                "regex::Regex::new({:?}).map(|re| re.is_match(&{var})).unwrap_or(false)",
+                pattern
+            ),
+            TargetLang::Python => {
+                let safe_pattern = escape_for_lang(pattern, lang);
+                format!("bool(re.fullmatch(r\"{safe_pattern}\", {var}))")
+            }
+            TargetLang::Go => {
+                let safe_pattern = escape_for_lang(pattern, lang);
+                format!("regexp.MustCompile(`{safe_pattern}`).MatchString({var})")
+            }
+            TargetLang::Java => {
+                let safe_pattern = escape_for_lang(pattern, lang);
+                format!("{var}.matches(\"{safe_pattern}\")")
+            }
+            TargetLang::JavaScript => {
+                let safe_pattern = escape_for_lang(pattern, lang);
+                format!("/{safe_pattern}/.test({var})")
+            }
+            TargetLang::TypeScript => {
+                let safe_pattern = escape_for_lang(pattern, lang);
+                format!("/{safe_pattern}/.test({var})")
+            }
         },
     }
 }

@@ -126,6 +126,8 @@ pub struct ParseResult {
     pub errors: Vec<ParseError>,
     /// `lang <language>` で指定された出力言語（省略時は Rust）
     pub lang:    TargetLang,
+    /// `.hb` 内で `lang` が一度でも現れたか（ブロック外または `config:` 内）。false のときは `lang` はデフォルト Rust のみで、config.hb の言語を上書きしない。
+    pub lang_specified: bool,
     /// `agent <name>` で指定された AI エージェント（省略時は None）
     pub agent:   Option<AgentKind>,
     /// `api_key <key>` で指定された API キー（省略時は None）
@@ -168,6 +170,7 @@ pub fn parse_hb(text: &str) -> ParseResult {
 fn parse_file_config(text: &str) -> ParseResult {
     let mut errors:       Vec<ParseError>  = Vec::new();
     let mut file_lang:    TargetLang       = TargetLang::Rust;
+    let mut lang_specified: bool           = false;
     let mut file_agent:   Option<AgentKind> = None;
     let mut file_api_key: Option<String>   = None;
     let mut file_model:   Option<String>   = None;
@@ -186,7 +189,10 @@ fn parse_file_config(text: &str) -> ParseResult {
             "lang" => {
                 let val = rest.split_whitespace().next().unwrap_or(rest);
                 match val.parse::<TargetLang>() {
-                    Ok(l)  => file_lang = l,
+                    Ok(l)  => {
+                        file_lang = l;
+                        lang_specified = true;
+                    }
                     Err(e) => errors.push(ParseError {
                         span:     Span::whole_line(line_no, trimmed.len() as u32),
                         message:  format!("lang 指定エラー: {e}"),
@@ -265,6 +271,7 @@ fn parse_file_config(text: &str) -> ParseResult {
         goals:   Vec::new(),
         errors,
         lang:    file_lang,
+        lang_specified,
         agent:   file_agent,
         api_key: file_api_key,
         model:   file_model,

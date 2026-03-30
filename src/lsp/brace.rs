@@ -25,7 +25,7 @@
 //!
 //! カンマは `config` 内・トップレベルフィールドの区切りとして **省略可能**。
 //!
-//! コメントは行頭の `#`（行全体）および `//`（以降）。ブロック内の `key:` を持たない行は注釈として **無視** します。
+//! コメントは行頭の `#`（行全体）および `//`（以降。バッククォート `` ` `` 内の `//` はコメント開始にしない）。ブロック内の `key:` を持たない行は注釈として **無視** します。
 
 use crate::codegen::TargetLang;
 use crate::config::AgentKind;
@@ -43,6 +43,22 @@ pub(crate) struct BraceFileMeta {
     pub api_key: Option<String>,
 }
 
+/// 行内で最初に現れる `//`（行コメント開始）のバイト位置。  
+/// バッククォート `` ` `` で囲まれた部分の中は `//` をコメントとみなさない（例: `` `https://...` ``）。
+fn line_comment_start(line: &str) -> Option<usize> {
+    let mut in_bt = false;
+    for (i, c) in line.char_indices() {
+        if c == '`' {
+            in_bt = !in_bt;
+            continue;
+        }
+        if !in_bt && c == '/' && line[i..].starts_with("//") {
+            return Some(i);
+        }
+    }
+    None
+}
+
 /// `//` より後ろ、および行頭 `#` 以降はブレイス走査から除外（コメント内の `{` `}` をブロックにしない）。
 fn brace_scan_line_prefix(line: &str) -> &str {
     let trimmed = line.trim_start();
@@ -50,7 +66,7 @@ fn brace_scan_line_prefix(line: &str) -> &str {
         let ws_len = line.len() - trimmed.len();
         return &line[..ws_len];
     }
-    if let Some(i) = line.find("//") {
+    if let Some(i) = line_comment_start(line) {
         return &line[..i];
     }
     line
@@ -161,7 +177,7 @@ fn strip_line_comment(line: &str) -> &str {
     if ts.starts_with('#') {
         return "";
     }
-    if let Some(i) = line.find("//") {
+    if let Some(i) = line_comment_start(line) {
         line[..i].trim_end()
     } else {
         line
@@ -1031,6 +1047,7 @@ pub(crate) fn merge_brace_meta_into_result(
     }
     if let Some(l) = meta.lang {
         result.lang = l;
+        result.lang_specified = true;
     }
     if let Some(k) = meta.api_key {
         result.api_key = Some(k);
@@ -1040,6 +1057,18 @@ pub(crate) fn merge_brace_meta_into_result(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strip_line_comment_ignores_slash_slash_inside_backticks() {
+        let line = r#"note: `https://example.com/path` tail"#;
+        assert_eq!(strip_line_comment(line), line);
+    }
+
+    #[test]
+    fn strip_line_comment_still_strips_after_closing_backtick() {
+        let line = r#"x: `ok` // comment"#;
+        assert_eq!(strip_line_comment(line).trim(), "x: `ok`");
+    }
 
     #[test]
     fn find_outer_brace_ranges_ignore_braces_inside_line_comments() {
