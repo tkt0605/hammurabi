@@ -96,6 +96,8 @@ pub struct ParsedGoal {
     pub id:        Option<String>,
     /// `model:` で指定した AI モデルバージョン固定（再現性の基盤）
     pub model_pin: Option<String>,
+    /// `depends_on: [id1, id2]` で指定した依存ゴールの ID リスト
+    pub depends_on: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -141,12 +143,12 @@ pub struct ParseResult {
 /// `.hb` テキストを解析し、`ParseResult` を返す。
 /// エラーが含まれていても可能な限りパースを継続する（寛容なパーサ）。
 ///
-/// 行ベース構文に加え、ファイル内の最外殻 `{ ... }` ブロックを
-/// [`brace::parse_brace_block`] で解釈し、得られた `goal` 群（複数 `define` 可）と `config` をマージする。
+/// goal 定義は `{ define: { ... } }` ブロック形式のみサポート。
+/// ブロック外に書けるのはファイルレベルの設定行（`agent`, `model`, `lang`, `api_key`）のみ。
 pub fn parse_hb(text: &str) -> ParseResult {
     let ranges = brace::find_outer_brace_ranges(text);
     let masked = brace::mask_brace_ranges(text, &ranges);
-    let mut result = parse_hb_line_based(&masked);
+    let mut result = parse_file_config(&masked);
 
     for range in ranges {
         match brace::parse_brace_block(text, range) {
@@ -161,34 +163,27 @@ pub fn parse_hb(text: &str) -> ParseResult {
     result
 }
 
-fn parse_hb_line_based(text: &str) -> ParseResult {
-    let mut goals:      Vec<ParsedGoal>    = Vec::new();
-    let mut errors:     Vec<ParseError>    = Vec::new();
-    let mut current:    Option<ParsedGoal> = None;
-    let mut file_lang:  TargetLang         = TargetLang::Rust;
-    let mut file_agent: Option<AgentKind>  = None;
+/// ブロック外のテキストからファイルレベルの設定（agent / model / lang / api_key）のみを読む。
+/// goal 定義は `{ define: { ... } }` ブロック形式専用になったため、ここでは扱わない。
+fn parse_file_config(text: &str) -> ParseResult {
+    let mut errors:       Vec<ParseError>  = Vec::new();
+    let mut file_lang:    TargetLang       = TargetLang::Rust;
+    let mut file_agent:   Option<AgentKind> = None;
     let mut file_api_key: Option<String>   = None;
-    let mut file_model: Option<String>     = None;
+    let mut file_model:   Option<String>   = None;
 
     for (line_idx, raw_line) in text.lines().enumerate() {
         let line_no = line_idx as u32;
         let trimmed  = raw_line.trim();
 
-        // 空行・コメント行はスキップ
-        if trimmed.is_empty()
-            || trimmed.starts_with("//")
-            || trimmed.starts_with('#')
-        {
+        if trimmed.is_empty() || trimmed.starts_with("//") || trimmed.starts_with('#') {
             continue;
         }
 
-        // キーワードと残りに分割
         let (keyword, rest) = split_keyword(trimmed);
-        let kw_lower = keyword.to_lowercase();
 
-        match kw_lower.as_str() {
+        match keyword.to_lowercase().as_str() {
             "lang" => {
-                // ファイルレベルの言語指定: `lang python`
                 let val = rest.split_whitespace().next().unwrap_or(rest);
                 match val.parse::<TargetLang>() {
                     Ok(l)  => file_lang = l,
@@ -199,9 +194,7 @@ fn parse_hb_line_based(text: &str) -> ParseResult {
                     }),
                 }
             }
-
             "agent" => {
-                // AI エージェント指定: `agent openai`
                 let val = rest.split_whitespace().next().unwrap_or(rest);
                 match val.parse::<AgentKind>() {
                     Ok(a)  => file_agent = Some(a),
@@ -212,315 +205,55 @@ fn parse_hb_line_based(text: &str) -> ParseResult {
                     }),
                 }
             }
-
             "api_key" | "apikey" | "api-key" => {
-                // API キー指定: 3 通りの書き方をサポート
-                //   api_key sk-proj-xxx          → 直書き（⚠ .gitignore 推奨）
-                //   api_key $OPENAI_API_KEY      → 環境変数参照（.env も可）
-                //   api_key $MY_CUSTOM_KEY       → 任意の環境変数名
                 let val = rest.split_whitespace().next().unwrap_or(rest);
                 if val.is_empty() {
                     errors.push(ParseError {
                         span:     Span::whole_line(line_no, trimmed.len() as u32),
-                        message:  "api_key の後に値が必要です。\
-                                   直書き: `api_key sk-proj-xxx`\
-                                   変数参照: `api_key $OPENAI_API_KEY`".into(),
+                        message:  "api_key の後に値が必要です（例: `api_key $OPENAI_API_KEY`）".into(),
                         severity: ErrorSeverity::Error,
                     });
                 } else if let Some(var_name) = val.strip_prefix('$') {
-                    // ─── $ENV_VAR 形式 ─────────────────────────────────
-                    // .env がロード済みであれば dotenvy 経由の値も std::env::var で取得できる
                     match std::env::var(var_name) {
-                        Ok(resolved) if !resolved.is_empty() => {
-                            file_api_key = Some(resolved);
-                            // 解決成功: info 扱い（警告なし）
-                        }
-                        Ok(_) | Err(_) => {
-                            errors.push(ParseError {
-                                span:     Span::whole_line(line_no, trimmed.len() as u32),
-                                message:  format!(
-                                    "環境変数 `{var_name}` が未設定または空です。\
-                                     .env ファイルに `{var_name}=sk-...` を追加するか、\
-                                     `export {var_name}=sk-...` を実行してください。"
-                                ),
-                                severity: ErrorSeverity::Warning,
-                            });
-                        }
+                        Ok(resolved) if !resolved.is_empty() => file_api_key = Some(resolved),
+                        _ => errors.push(ParseError {
+                            span:     Span::whole_line(line_no, trimmed.len() as u32),
+                            message:  format!(
+                                "環境変数 `{var_name}` が未設定または空です。\
+                                 .env ファイルに `{var_name}=sk-...` を追加してください。"
+                            ),
+                            severity: ErrorSeverity::Warning,
+                        }),
                     }
                 } else {
-                    // ─── 直書きキー ─────────────────────────────────────
                     file_api_key = Some(val.to_owned());
                     errors.push(ParseError {
                         span:     Span::whole_line(line_no, trimmed.len() as u32),
-                        message:  "⚠ api_key を .hb ファイルに直書きしています。\
-                                   `api_key $OPENAI_API_KEY` のように環境変数を参照することを推奨します。".into(),
+                        message:  "⚠ api_key を直書きしています。`$ENV_VAR` 形式の環境変数参照を推奨します。".into(),
                         severity: ErrorSeverity::Warning,
                     });
                 }
             }
-
             "model" => {
-                // goal 定義中なら goal レベルの model PIN、それ以外はファイルレベル設定
-                if let Some(ref mut entry) = current {
-                    let model_val = rest.trim().to_owned();
-                    if model_val.is_empty() {
-                        errors.push(ParseError {
-                            span:     Span::whole_line(line_no, trimmed.len() as u32),
-                            message:  "`model:` の後にモデル名が必要です（例: `model: gpt-4o@2024-05-13`）".into(),
-                            severity: ErrorSeverity::Error,
-                        });
-                    } else {
-                        entry.model_pin = Some(model_val.clone());
-                        entry.goal.model_pin = Some(model_val);
-                    }
-                } else {
-                    // ファイルレベルのモデル指定: `model gpt-4o`
-                    let val = rest.split_whitespace().next().unwrap_or(rest);
-                    if val.is_empty() {
-                        errors.push(ParseError {
-                            span:     Span::whole_line(line_no, trimmed.len() as u32),
-                            message:  "model の後にモデル名が必要です（例: `model gpt-4o`）".into(),
-                            severity: ErrorSeverity::Error,
-                        });
-                    } else {
-                        file_model = Some(val.to_owned());
-                    }
-                }
-            }
-
-            "goal" => {
-                // 前のゴールを確定（items が空 + label あり → needs_ai）
-                if let Some(mut g) = current.take() {
-                    if g.items.is_empty() && g.label.is_some() {
-                        g.needs_ai = true;
-                    }
-                    goals.push(g);
-                }
-
-                if rest.is_empty() {
+                let val = rest.split_whitespace().next().unwrap_or(rest);
+                if val.is_empty() {
                     errors.push(ParseError {
                         span:     Span::whole_line(line_no, trimmed.len() as u32),
-                        message:  "`goal` の後に関数名が必要です（例: `goal safe_division` または `goal \"自然言語の説明\"`）".into(),
+                        message:  "model の後にモデル名が必要です（例: `model gpt-4o`）".into(),
                         severity: ErrorSeverity::Error,
                     });
                 } else {
-                    match parse_goal_rhs(rest) {
-                        Ok((name, label)) => {
-                            let col = col_of(raw_line, &name);
-                            current = Some(ParsedGoal {
-                                goal:      ContractualGoal::new(&name),
-                                name_span: Span::new(line_no, col, col + name.len() as u32),
-                                items:     Vec::new(),
-                                intent:    None,
-                                needs_ai:  false, // 後続の require/ensure がなければ確定時に true にセット
-                                label,
-                                id:        None,
-                                model_pin: None,
-                            });
-                        }
-                        Err(msg) => {
-                            errors.push(ParseError {
-                                span:     Span::whole_line(line_no, trimmed.len() as u32),
-                                message:  msg,
-                                severity: ErrorSeverity::Error,
-                            });
-                        }
-                    }
+                    file_model = Some(val.to_owned());
                 }
             }
-
-            "examples" => {
-                let Some(ref mut entry) = current else {
-                    errors.push(ParseError {
-                        span:     Span::whole_line(line_no, keyword.len() as u32),
-                        message:  "`examples:` の前に `goal <name>` が必要です".into(),
-                        severity: ErrorSeverity::Error,
-                    });
-                    continue;
-                };
-                // 単行形式: `examples: (10, 2) => Ok(5), (7, 0) => Err("x")`
-                // （`[` で始まる場合は `]` まで続く多行形式を後続行で読む予定だが、
-                //  行ベースパーサでは単行のみサポート）
-                let raw = rest.trim().trim_start_matches('[').trim_end_matches(']');
-                if raw.is_empty() {
-                    // `examples: []` or `examples:` — 空、無視
-                } else {
-                    // カンマ区切りで複数 example を処理
-                    let items: Vec<(u32, String)> = split_top_level_comma(raw)
-                        .into_iter()
-                        .map(|s| (line_no, s.trim().to_owned()))
-                        .collect();
-                    match parse_examples(&items) {
-                        Ok(exs) => entry.goal.examples.extend(exs),
-                        Err(msg) => errors.push(ParseError {
-                            span:     Span::whole_line(line_no, trimmed.len() as u32),
-                            message:  msg,
-                            severity: ErrorSeverity::Error,
-                        }),
-                    }
-                }
-            }
-
-            "inputs" => {
-                let Some(ref mut entry) = current else {
-                    errors.push(ParseError {
-                        span:     Span::whole_line(line_no, keyword.len() as u32),
-                        message:  "`inputs:` の前に `goal <name>` が必要です".into(),
-                        severity: ErrorSeverity::Error,
-                    });
-                    continue;
-                };
-                if rest.is_empty() {
-                    errors.push(ParseError {
-                        span:     Span::whole_line(line_no, trimmed.len() as u32),
-                        message:  "`inputs:` の後にパラメータが必要です（例: `inputs: n: i32, m: i32`）".into(),
-                        severity: ErrorSeverity::Error,
-                    });
-                    continue;
-                }
-                match parse_inputs(rest) {
-                    Ok(params) => entry.goal.inputs = params,
-                    Err(msg)   => errors.push(ParseError {
-                        span:     Span::whole_line(line_no, trimmed.len() as u32),
-                        message:  msg,
-                        severity: ErrorSeverity::Error,
-                    }),
-                }
-            }
-
-            "output" => {
-                let Some(ref mut entry) = current else {
-                    errors.push(ParseError {
-                        span:     Span::whole_line(line_no, keyword.len() as u32),
-                        message:  "`output:` の前に `goal <name>` が必要です".into(),
-                        severity: ErrorSeverity::Error,
-                    });
-                    continue;
-                };
-                let type_str = rest.trim();
-                if type_str.is_empty() {
-                    errors.push(ParseError {
-                        span:     Span::whole_line(line_no, trimmed.len() as u32),
-                        message:  "`output:` の後に型が必要です（例: `output: Option<i32>`）".into(),
-                        severity: ErrorSeverity::Error,
-                    });
-                    continue;
-                }
-                entry.goal.output = Some(type_str.to_owned());
-            }
-
-            "id" => {
-                let Some(ref mut entry) = current else {
-                    errors.push(ParseError {
-                        span:     Span::whole_line(line_no, keyword.len() as u32),
-                        message:  "`id:` の前に `goal <name>` が必要です".into(),
-                        severity: ErrorSeverity::Error,
-                    });
-                    continue;
-                };
-                let id_val = rest.trim();
-                if id_val.is_empty() || id_val.contains(char::is_whitespace) {
-                    errors.push(ParseError {
-                        span:     Span::whole_line(line_no, trimmed.len() as u32),
-                        message:  "`id:` はスペースを含まない識別子にしてください（例: `id: safe_divide_v1`）".into(),
-                        severity: ErrorSeverity::Error,
-                    });
-                    continue;
-                }
-                entry.id = Some(id_val.to_owned());
-                entry.goal.id = Some(id_val.to_owned());
-            }
-
-            kw @ ("require" | "ensure" | "invariant" | "forbid") => {
-                let Some(ref mut entry) = current else {
-                    errors.push(ParseError {
-                        span:     Span::whole_line(line_no, keyword.len() as u32),
-                        message:  format!("`{kw}` の前に `goal <name>` が必要です"),
-                        severity: ErrorSeverity::Error,
-                    });
-                    continue;
-                };
-
-                if rest.is_empty() {
-                    errors.push(ParseError {
-                        span:     Span::whole_line(line_no, trimmed.len() as u32),
-                        message:  format!("`{kw}` の後に述語が必要です"),
-                        severity: ErrorSeverity::Error,
-                    });
-                    continue;
-                }
-
-                let col   = col_of(raw_line, rest);
-                let span  = Span::new(line_no, col, col + rest.len() as u32);
-
-                match kw {
-                    "require" => match parse_predicate(rest) {
-                        Ok(pred) => {
-                            let display = pred.to_string();
-                            entry.items.push(ParsedItem {
-                                span,
-                                kind:    ItemKind::Precondition,
-                                hover:   format!("**Precondition**\n\n`{display}`\n\n呼び出し元が保証する入力の性質。"),
-                                display: display.clone(),
-                            });
-                            entry.goal = entry.goal.clone().require(pred);
-                        }
-                        Err(msg) => errors.push(ParseError { span, message: msg, severity: ErrorSeverity::Error }),
-                    },
-
-                    "ensure" => match parse_predicate(rest) {
-                        Ok(pred) => {
-                            let display = pred.to_string();
-                            entry.items.push(ParsedItem {
-                                span,
-                                kind:    ItemKind::Postcondition,
-                                hover:   format!("**Postcondition**\n\n`{display}`\n\nこの関数が保証しなければならない出力の性質。"),
-                                display: display.clone(),
-                            });
-                            entry.goal = entry.goal.clone().ensure(pred);
-                        }
-                        Err(msg) => errors.push(ParseError { span, message: msg, severity: ErrorSeverity::Error }),
-                    },
-
-                    "invariant" => match parse_predicate(rest) {
-                        Ok(pred) => {
-                            let display = pred.to_string();
-                            entry.items.push(ParsedItem {
-                                span,
-                                kind:    ItemKind::Invariant,
-                                hover:   format!("**Invariant**\n\n`{display}`\n\n実行中ずっと成立しなければならない不変条件。"),
-                                display: display.clone(),
-                            });
-                            entry.goal = entry.goal.clone().invariant(pred);
-                        }
-                        Err(msg) => errors.push(ParseError { span, message: msg, severity: ErrorSeverity::Error }),
-                    },
-
-                    "forbid" => match parse_forbidden(rest) {
-                        Ok(fp) => {
-                            let display = fp.to_string();
-                            entry.items.push(ParsedItem {
-                                span,
-                                kind:    ItemKind::Forbidden,
-                                hover:   format!("**Forbidden Pattern**\n\n`{display}`\n\n{}", forbidden_doc(&fp)),
-                                display: display.clone(),
-                            });
-                            entry.goal = entry.goal.clone().forbid(fp);
-                        }
-                        Err(msg) => errors.push(ParseError { span, message: msg, severity: ErrorSeverity::Error }),
-                    },
-
-                    _ => unreachable!(),
-                }
-            }
-
-            _ => {
+            other => {
+                // goal などのキーワードはブロック形式のみ有効
                 errors.push(ParseError {
-                    span:    Span::new(line_no, 0, keyword.len() as u32),
-                    message: format!(
-                        "不明なキーワード: `{keyword}`\n\
-                         ファイル設定: `agent`, `api_key`, `model`, `lang`\n\
-                         ゴール定義: `goal`, `id`, `model`, `inputs`, `output`, `examples`, `require`, `ensure`, `invariant`, `forbid`"
+                    span:     Span::new(line_no, 0, other.len() as u32),
+                    message:  format!(
+                        "ブロック外に `{other}` は書けません。\n\
+                         goal の定義は `{{ define: {{ ... }} }}` ブロック形式で記述してください。\n\
+                         ファイルレベルの設定: `agent`, `model`, `lang`, `api_key`"
                     ),
                     severity: ErrorSeverity::Error,
                 });
@@ -528,14 +261,8 @@ fn parse_hb_line_based(text: &str) -> ParseResult {
         }
     }
 
-    if let Some(mut g) = current {
-        if g.items.is_empty() && g.label.is_some() {
-            g.needs_ai = true;
-        }
-        goals.push(g);
-    }
     ParseResult {
-        goals,
+        goals:   Vec::new(),
         errors,
         lang:    file_lang,
         agent:   file_agent,
@@ -615,6 +342,36 @@ pub(crate) fn parse_predicate(s: &str) -> Result<Predicate, String> {
         return Err("Equals には 2 つの引数が必要です（例: `Equals(divisor, 0)`）".into());
     }
 
+    // Regex(var, "pattern") — 文字列正規表現制約
+    if s.starts_with("Regex(") && s.ends_with(')') {
+        let inner = &s["Regex(".len()..s.len() - 1];
+        // パターン内にカンマが含まれる可能性があるため、最初のカンマだけで分割する
+        if let Some(comma_pos) = inner.find(',') {
+            let var = inner[..comma_pos].trim();
+            let pattern_raw = inner[comma_pos + 1..].trim();
+            // ダブルクォートを除去
+            let pattern = if pattern_raw.starts_with('"') && pattern_raw.ends_with('"') {
+                &pattern_raw[1..pattern_raw.len() - 1]
+            } else {
+                pattern_raw
+            };
+            if var.is_empty() {
+                return Err("Regex の変数名が空です（例: `Regex(email, \"^[a-z]+$\")`）".into());
+            }
+            if pattern.is_empty() {
+                return Err("Regex のパターンが空です（例: `Regex(email, \"^[a-z]+$\")`）".into());
+            }
+            // パーサ段階でパターンの構文チェックを行う
+            if let Err(e) = regex::Regex::new(pattern) {
+                return Err(format!("Regex: 無効な正規表現パターン {pattern:?}: {e}"));
+            }
+            return Ok(Predicate::regex(var, pattern));
+        }
+        return Err(
+            "Regex には 2 つの引数が必要です（例: `Regex(email, \"^[a-z]+$\")`）".into()
+        );
+    }
+
     // When(cond, consequence) — Implies のシンタックスシュガー
     if s.starts_with("When(") && s.ends_with(')') {
         let inner = &s["When(".len()..s.len() - 1];
@@ -633,8 +390,8 @@ pub(crate) fn parse_predicate(s: &str) -> Result<Predicate, String> {
 
     Err(format!(
         "述語 `{s}` を解析できません\n\
-         使用例: `NonNull(var)`, `InRange(var, min, max)`, `atom_name`,\n\
-         `Not(pred)`, `And(p1, p2)`, `Or(p1, p2)`, `When(cond, consequence)`"
+         使用例: `NonNull(var)`, `InRange(var, min, max)`, `Regex(var, \"pattern\")`,\n\
+         `Equals(a, b)`, `Not(pred)`, `And(p1, p2)`, `Or(p1, p2)`, `When(cond, consequence)`"
     ))
 }
 
@@ -667,41 +424,19 @@ pub(crate) fn parse_forbidden(s: &str) -> Result<ForbiddenPattern, String> {
     }
 }
 
-fn forbidden_doc(fp: &ForbiddenPattern) -> &'static str {
-    match fp {
-        ForbiddenPattern::NonExhaustiveBranch => "全分岐を型レベルで網羅することを要求。",
-        ForbiddenPattern::RuntimeNullCheck    => "NonNull を型システムで証明することを要求。",
-        ForbiddenPattern::ImplicitCoercion    => "暗黙の型強制を禁止。",
-        ForbiddenPattern::UnprovenUnwrap      => "証明なしの unwrap/expect を禁止。",
-        ForbiddenPattern::CatchAllSuppression => "`_` パターンによるロジック隠蔽を禁止。",
-    }
-}
-
 // ---------------------------------------------------------------------------
 // ユーティリティ
 // ---------------------------------------------------------------------------
 
-/// 先頭のキーワードと残りに分割する。
-/// キーワードと残りの値に分割する。
-/// `key: value`、`key:value`、`key value` の 3 形式すべてを受け付ける。
+/// `key: value`、`key:value`、`key value` の 3 形式からキーワードと値を分割する。
 fn split_keyword(s: &str) -> (&str, &str) {
-    // `key: value` または `key:value` 形式（コロン区切り）を優先
     if let Some((k, v)) = s.split_once(':') {
-        let kw   = k.trim();
-        let rest = v.trim();
-        // コロン後が空の場合（`goal:` のみの行）は空文字を返す
-        return (kw, rest);
+        return (k.trim(), v.trim());
     }
-    // 旧来の `key value` 形式（スペース区切り）にフォールバック
     let mut iter = s.splitn(2, |c: char| c.is_whitespace());
     let kw   = iter.next().unwrap_or("");
     let rest = iter.next().map(|r| r.trim()).unwrap_or("");
     (kw, rest)
-}
-
-/// `needle` が `line` 中で最初に登場する列（UTF-8 考慮）を返す。
-fn col_of(line: &str, needle: &str) -> u32 {
-    line.find(needle).unwrap_or(0) as u32
 }
 
 /// `goal:` の右辺を `(identifier, label)` に分解する。
@@ -986,18 +721,23 @@ pub(crate) fn label_to_slug(label: &str) -> String {
 mod tests {
     use super::*;
 
+    // ブロック形式のサンプル。goal: safe_division は 0-indexed で 3 行目に位置する。
     const SAMPLE: &str = r#"
-// safe_division の ContractualGoal
-
-goal safe_division
-require NonNull(divisor)
-require InRange(divisor, 1, 9223372036854775807)
-require dividend_is_integer
-ensure  result_is_finite
-ensure  result_within_i64_range
-invariant no_memory_aliasing
-forbid RuntimeNullCheck
-forbid UnprovenUnwrap
+{
+  define: {
+    goal: safe_division
+    settings: [
+      require: NonNull(divisor)
+      require: InRange(divisor, 1, 9223372036854775807)
+      require: dividend_is_integer
+      ensure:  result_is_finite
+      ensure:  result_within_i64_range
+      invariant: no_memory_aliasing
+      forbid: RuntimeNullCheck
+      forbid: UnprovenUnwrap
+    ]
+  }
+}
 "#;
 
     #[test]
@@ -1037,53 +777,85 @@ forbid UnprovenUnwrap
 
     #[test]
     fn multiple_goals_in_one_file() {
-        let src = "goal foo\nensure ok\n\ngoal bar\nensure done\n";
+        let src = r#"
+{
+  define: {
+    goal: foo
+    settings: [
+      ensure: ok
+    ]
+  }
+  define: {
+    goal: bar
+    settings: [
+      ensure: done
+    ]
+  }
+}
+"#;
         let result = parse_hb(src);
         assert_eq!(result.goals.len(), 2);
     }
 
     #[test]
     fn unknown_keyword_produces_error() {
-        let result = parse_hb("goal foo\nwhatever blah\nensure ok\n");
-        assert!(result.errors.iter().any(|e| e.message.contains("不明なキーワード")));
+        // settings ブロック内の不明キーはエラーになる
+        let src = "{\n  define: {\n    goal: foo\n    settings: [\n      whatever: blah\n      ensure: ok\n    ]\n  }\n}";
+        let result = parse_hb(src);
+        assert!(
+            result.errors.iter().any(|e| e.message.contains("不明キー")),
+            "エラーが見つかりません: {:?}", result.errors
+        );
     }
 
     #[test]
     fn statement_before_goal_produces_error() {
+        // ブロック外にキーワードを書くとエラー
         let result = parse_hb("require NonNull(x)\n");
-        assert!(result.errors.iter().any(|e| e.message.contains("goal <name>")));
+        assert!(
+            result.errors.iter().any(|e| e.message.contains("ブロック外")),
+            "エラーが見つかりません: {:?}", result.errors
+        );
     }
 
     #[test]
     fn invalid_in_range_min_gt_max() {
-        let result = parse_hb("goal foo\nrequire InRange(x, 100, 1)\nensure ok\n");
-        assert!(result.errors.iter().any(|e| e.message.contains("min")));
+        let src = "{\n  define: {\n    goal: foo\n    settings: [\n      require: InRange(x, 100, 1)\n      ensure: ok\n    ]\n  }\n}";
+        let result = parse_hb(src);
+        assert!(
+            result.errors.iter().any(|e| e.message.contains("min")),
+            "エラーが見つかりません: {:?}", result.errors
+        );
     }
 
     #[test]
     fn invalid_forbidden_pattern() {
-        let result = parse_hb("goal foo\nensure ok\nforbid Bogus\n");
-        assert!(result.errors.iter().any(|e| e.message.contains("不明な禁止パターン")));
+        let src = "{\n  define: {\n    goal: foo\n    settings: [\n      ensure: ok\n      forbid: Bogus\n    ]\n  }\n}";
+        let result = parse_hb(src);
+        assert!(
+            result.errors.iter().any(|e| e.message.contains("不明な禁止パターン")),
+            "エラーが見つかりません: {:?}", result.errors
+        );
     }
 
     #[test]
     fn name_span_line_is_correct() {
         let result = parse_hb(SAMPLE);
-        // "goal safe_division" はサンプル中の 4 行目（0-indexed: 3）
+        // SAMPLE は r#"\n{\n  define: {\n    goal: safe_division\n..." → `goal:` は 0-indexed 3 行目
         assert_eq!(result.goals[0].name_span.line, 3);
     }
 
     #[test]
     fn complex_predicate_and() {
-        let result = parse_hb(
-            "goal foo\nrequire And(NonNull(x), InRange(x, 0, 100))\nensure ok\n"
-        );
+        let src = "{\n  define: {\n    goal: foo\n    settings: [\n      require: And(NonNull(x), InRange(x, 0, 100))\n      ensure: ok\n    ]\n  }\n}";
+        let result = parse_hb(src);
         assert_eq!(result.errors.len(), 0, "{:?}", result.errors);
     }
 
     #[test]
     fn complex_predicate_not() {
-        let result = parse_hb("goal foo\nrequire Not(NonNull(x))\nensure ok\n");
+        let src = "{\n  define: {\n    goal: foo\n    settings: [\n      require: Not(NonNull(x))\n      ensure: ok\n    ]\n  }\n}";
+        let result = parse_hb(src);
         assert_eq!(result.errors.len(), 0, "{:?}", result.errors);
     }
 
@@ -1109,8 +881,17 @@ forbid UnprovenUnwrap
     }
 
     #[test]
-    fn line_based_goal_accepts_label() {
-        let src = "goal: safe_div \"ゼロ除算を防ぐ\"\nensure: n_ok\n";
+    fn block_format_goal_accepts_label() {
+        let src = r#"
+{
+  define: {
+    goal: safe_div "ゼロ除算を防ぐ"
+    settings: [
+      ensure: n_ok
+    ]
+  }
+}
+"#;
         let result = parse_hb(src);
         assert_eq!(result.errors.len(), 0, "{:?}", result.errors);
         assert_eq!(result.goals[0].goal.name, "safe_div");
@@ -1118,8 +899,17 @@ forbid UnprovenUnwrap
     }
 
     #[test]
-    fn line_based_goal_pure_quoted() {
-        let src = "goal: \"自然言語のゴール名\"\nensure: done\n";
+    fn block_format_goal_pure_quoted() {
+        let src = r#"
+{
+  define: {
+    goal: "自然言語のゴール名"
+    settings: [
+      ensure: done
+    ]
+  }
+}
+"#;
         let result = parse_hb(src);
         assert_eq!(result.errors.len(), 0, "{:?}", result.errors);
         let g = &result.goals[0];

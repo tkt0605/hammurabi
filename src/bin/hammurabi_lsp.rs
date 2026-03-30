@@ -272,6 +272,7 @@ fn compute_hover(text: &str, pos: Position) -> Option<Hover> {
         needs_ai,
         id,
         model_pin,
+        depends_on,
     } in &goals
     {
         // ゴール名をホバー → ContractualGoal のサマリを表示
@@ -289,6 +290,10 @@ fn compute_hover(text: &str, pos: Position) -> Option<Hover> {
             }
             if let Some(model_str) = model_pin.as_deref() {
                 meta_badges.push_str(&format!("📌 **model PIN:** `{model_str}`  "));
+            }
+            if !depends_on.is_empty() {
+                let deps = depends_on.iter().map(|d| format!("`{d}`")).collect::<Vec<_>>().join(", ");
+                meta_badges.push_str(&format!("🔗 **depends_on:** {deps}  "));
             }
             if !meta_badges.is_empty() {
                 meta_badges.push('\n');

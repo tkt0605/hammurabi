@@ -305,6 +305,16 @@ fn read_balanced_square_inner_lines(
     }
 }
 
+/// `depends_on: [id1, id2]` または `depends_on: id1, id2` から ID リストをパースする。
+fn parse_id_list(s: &str) -> Vec<String> {
+    let inner = s.trim().trim_start_matches('[').trim_end_matches(']');
+    inner
+        .split(',')
+        .map(|t| t.trim().to_owned())
+        .filter(|t| !t.is_empty())
+        .collect()
+}
+
 /// `intent: """..."""` — トリプルクォート文字列パーサ。
 ///
 /// 単行: `intent: """設計の意図"""`
@@ -374,10 +384,12 @@ fn assemble_parsed_goal(
     needs_ai:       bool,
     id:             Option<String>,
     model_pin:      Option<String>,
+    depends_on:     Vec<String>,
 ) -> Result<ParsedGoal, Vec<ParseError>> {
     let mut goal = ContractualGoal::new(name);
-    goal.id        = id.clone();
-    goal.model_pin = model_pin.clone();
+    goal.id         = id.clone();
+    goal.model_pin  = model_pin.clone();
+    goal.depends_on = depends_on.clone();
     let mut items: Vec<ParsedItem> = Vec::new();
 
     for (ln, sline) in settings_lines {
@@ -489,6 +501,7 @@ fn assemble_parsed_goal(
         needs_ai,
         id,
         model_pin,
+        depends_on,
     })
 }
 
@@ -503,9 +516,10 @@ fn parse_define_body(inner: &[(u32, String)]) -> Result<ParsedGoal, Vec<ParseErr
     let mut define_inputs:   Option<Vec<crate::lang::goal::Param>> = None;
     let mut define_output:   Option<String> = None;
     let mut define_examples: Vec<crate::lang::goal::Example> = Vec::new();
-    // id: / model: はトップレベルのみ（settings: 内には書かない）
-    let mut define_id:        Option<String> = None;
-    let mut define_model_pin: Option<String> = None;
+    // id: / model: / depends_on: はトップレベルのみ（settings: 内には書かない）
+    let mut define_id:         Option<String> = None;
+    let mut define_model_pin:  Option<String> = None;
+    let mut define_depends_on: Vec<String>    = Vec::new();
 
     while idx < inner.len() {
         let (ln, ref line) = inner[idx];
@@ -602,11 +616,22 @@ fn parse_define_body(inner: &[(u32, String)]) -> Result<ParsedGoal, Vec<ParseErr
                 define_model_pin = Some(rest.trim().to_owned());
                 idx += 1;
             }
+            "depends_on" | "depends-on" | "dependson" => {
+                if !define_depends_on.is_empty() {
+                    return Err(vec![err(ln, "`depends_on:` は define 内で 1 度だけ指定してください")]);
+                }
+                let ids = parse_id_list(rest.trim());
+                if ids.is_empty() {
+                    return Err(vec![err(ln, "`depends_on:` の後に依存先 ID が必要です（例: `depends_on: [id1, id2]`）")]);
+                }
+                define_depends_on = ids;
+                idx += 1;
+            }
             other => {
                 return Err(vec![err(
                     ln,
                     format!(
-                        "define 内の不明フィールド `{other}` — `id` / `model` / `intent` / `goal` / `inputs` / `output` / `examples` / `settings`"
+                        "define 内の不明フィールド `{other}` — `id` / `model` / `depends_on` / `intent` / `goal` / `inputs` / `output` / `examples` / `settings`"
                     ),
                 )]);
             }
@@ -630,7 +655,7 @@ fn parse_define_body(inner: &[(u32, String)]) -> Result<ParsedGoal, Vec<ParseErr
     }
     let settings = settings_lines.unwrap_or_default();
 
-    let mut pg = assemble_parsed_goal(&name, goal_label, goal_ln, settings, intent_text, needs_ai, define_id, define_model_pin)?;
+    let mut pg = assemble_parsed_goal(&name, goal_label, goal_ln, settings, intent_text, needs_ai, define_id, define_model_pin, define_depends_on)?;
     // define: トップレベルの inputs/output/examples を適用（settings 内の指定より優先しない — 後勝ち）
     if let Some(params) = define_inputs {
         if pg.goal.inputs.is_empty() {
@@ -709,7 +734,7 @@ fn parse_brace_inner(inner: &str, base_line: u32) -> Result<(BraceFileMeta, Vec<
                     )]);
                 };
                 let (body, next) = parse_settings_header(&lines, idx, rest, ln)?;
-                let pg = assemble_parsed_goal(gname, glabel.clone(), gln, body, None, false, None, None)?;
+                let pg = assemble_parsed_goal(gname, glabel.clone(), gln, body, None, false, None, None, vec![])?;
                 out.push(pg);
                 pending_goal = None;
                 idx = next;
@@ -728,7 +753,7 @@ fn parse_brace_inner(inner: &str, base_line: u32) -> Result<(BraceFileMeta, Vec<
     if let Some((ref name, ref glabel, gln)) = pending_goal {
         if glabel.is_some() {
             // settings: なし + label あり → needs_ai ゴールとして登録
-            let pg = assemble_parsed_goal(name, glabel.clone(), gln, vec![], None, true, None, None)?;
+            let pg = assemble_parsed_goal(name, glabel.clone(), gln, vec![], None, true, None, None, vec![])?;
             out.push(pg);
         } else {
             return Err(vec![err(
@@ -1048,8 +1073,8 @@ mod tests {
         let src = r#"
 {
   define: {
-    context: [ - x ]
-    # 設計・査定の意図
+    intent: """設計・査定の意図"""
+    # ハッシュコメントはスキップ
     goal: g
     settings: [
       # require は後で足す
@@ -1117,11 +1142,11 @@ mod tests {
     }
 
     #[test]
-    fn define_context_quoted_string() {
+    fn define_intent_single_line() {
         let src = r#"
 {
   define: {
-    context: "査定用の設計意図"
+    intent: """査定用の設計意図"""
     goal: g
     settings: [
       ensure: n_ok
@@ -1131,18 +1156,18 @@ mod tests {
 "#;
         let ranges = find_outer_brace_ranges(src);
         let (_meta, pgs) = parse_brace_block(src, ranges[0]).unwrap();
-        assert_eq!(pgs[0].context.as_deref(), Some("査定用の設計意図"));
+        assert_eq!(pgs[0].intent.as_deref(), Some("査定用の設計意図"));
     }
 
     #[test]
-    fn define_context_braced_multiline() {
+    fn define_intent_multiline() {
         let src = r#"
 {
   define: {
-    context: {
+    intent: """
       行1の意図
       行2の補足
-    }
+    """
     goal: g
     settings: [
       ensure: n_ok
@@ -1152,19 +1177,19 @@ mod tests {
 "#;
         let ranges = find_outer_brace_ranges(src);
         let (_meta, pgs) = parse_brace_block(src, ranges[0]).unwrap();
-        assert!(pgs[0].context.as_ref().unwrap().contains("行1"));
-        assert!(pgs[0].context.as_ref().unwrap().contains("行2"));
+        assert!(pgs[0].intent.as_ref().unwrap().contains("行1"));
+        assert!(pgs[0].intent.as_ref().unwrap().contains("行2"));
     }
 
     #[test]
-    fn define_context_bracket_with_dash_items() {
+    fn define_intent_multiline_with_bullets() {
         let src = r#"
 {
   define: {
-    context: [
+    intent: """
       - 並列の意図A
       - 並列の意図B
-    ]
+    """
     goal: g
     settings: [
       ensure: n_ok
@@ -1174,19 +1199,20 @@ mod tests {
 "#;
         let ranges = find_outer_brace_ranges(src);
         let (_meta, pgs) = parse_brace_block(src, ranges[0]).unwrap();
-        let c = pgs[0].context.as_ref().unwrap();
+        let c = pgs[0].intent.as_ref().unwrap();
         assert!(c.contains("- 並列の意図A"));
         assert!(c.contains("- 並列の意図B"));
     }
 
     #[test]
-    fn define_context_dash_list_only() {
+    fn define_intent_multiline_content_preserved() {
         let src = r#"
 {
   define: {
-    context:
-      - 行1
-      - 行2
+    intent: """
+      行1
+      行2
+    """
     goal: g
     settings: [
       ensure: n_ok
@@ -1196,18 +1222,17 @@ mod tests {
 "#;
         let ranges = find_outer_brace_ranges(src);
         let (_meta, pgs) = parse_brace_block(src, ranges[0]).unwrap();
-        let c = pgs[0].context.as_ref().unwrap();
-        assert!(c.contains("- 行1"));
-        assert!(c.contains("- 行2"));
+        let c = pgs[0].intent.as_ref().unwrap();
+        assert!(c.contains("行1"));
+        assert!(c.contains("行2"));
     }
 
     #[test]
-    fn define_context_same_line_dash_then_continued() {
+    fn define_intent_inline_content() {
         let src = r#"
 {
   define: {
-    context: - 先頭
-      - 続き
+    intent: """先頭の意図 - 続き"""
     goal: g
     settings: [
       ensure: n_ok
@@ -1217,18 +1242,18 @@ mod tests {
 "#;
         let ranges = find_outer_brace_ranges(src);
         let (_meta, pgs) = parse_brace_block(src, ranges[0]).unwrap();
-        let c = pgs[0].context.as_ref().unwrap();
-        assert!(c.starts_with("- 先頭"));
-        assert!(c.contains("- 続き"));
+        let c = pgs[0].intent.as_ref().unwrap();
+        assert!(c.contains("先頭の意図"));
+        assert!(c.contains("続き"));
     }
 
     #[test]
-    fn define_duplicate_context_errors() {
+    fn define_duplicate_intent_errors() {
         let src = r#"
 {
   define: {
-    context: "a"
-    context: "b"
+    intent: """a"""
+    intent: """b"""
     goal: g
     settings: [
       ensure: n_ok

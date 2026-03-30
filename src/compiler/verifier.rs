@@ -40,6 +40,14 @@ fn downcast_to_i64(v: &dyn Any) -> Option<i64> {
     None
 }
 
+/// `&dyn Any` を文字列スライスに変換する。
+/// 対応型: String, &str
+fn downcast_to_str(v: &dyn Any) -> Option<&str> {
+    if let Some(s) = v.downcast_ref::<String>() { return Some(s.as_str()); }
+    if let Some(s) = v.downcast_ref::<&str>()   { return Some(s); }
+    None
+}
+
 /// `&dyn Any` が「空」かどうかを判定する。
 /// 対応型: String, &str, Vec<_>（長さ 0 を空とみなす）
 fn downcast_is_empty(v: &dyn Any) -> Option<bool> {
@@ -229,8 +237,68 @@ impl Verifier for MockVerifier {
                     }
                 }
 
-                // 述語・クロスレール制約は Mock では未評価
-                Constraint::Predicate(_) | Constraint::ConsistentWith(_) => {}
+                // ── Regex ────────────────────────────────────────────────
+                // 文字列値がパターンにマッチするか評価する。
+                // 非文字列型では構造チェック（パターンが有効な正規表現か）のみ。
+                Constraint::Regex { pattern } => {
+                    let str_val = downcast_to_str(value as &dyn Any);
+                    match regex::Regex::new(pattern) {
+                        Err(e) => {
+                            return Err(VerificationError::Unsatisfiable {
+                                predicate: format!("Regex: 無効なパターン {pattern:?}: {e}"),
+                            });
+                        }
+                        Ok(re) => {
+                            if let Some(s) = str_val {
+                                if !re.is_match(s) {
+                                    return Err(VerificationError::Unsatisfiable {
+                                        predicate: format!(
+                                            "Regex: 値 {s:?} がパターン {pattern:?} にマッチしません"
+                                        ),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // ── ConsistentWith ───────────────────────────────────────
+                // spec が正規表現パターンに見える場合は即時評価する。
+                // レール ID（他レール参照）の場合は Z3 バックエンドが必要なため Mock では通過。
+                Constraint::ConsistentWith(spec) => {
+                    let looks_like_pattern = spec.starts_with('^')
+                        || spec.ends_with('$')
+                        || spec.contains('[')
+                        || spec.contains('*')
+                        || spec.contains('+')
+                        || spec.contains('?');
+                    if looks_like_pattern {
+                        if let Some(s) = downcast_to_str(value as &dyn Any) {
+                            match regex::Regex::new(spec) {
+                                Err(e) => {
+                                    return Err(VerificationError::Unsatisfiable {
+                                        predicate: format!(
+                                            "ConsistentWith: 無効なパターン {spec:?}: {e}"
+                                        ),
+                                    });
+                                }
+                                Ok(re) if !re.is_match(s) => {
+                                    return Err(VerificationError::Unsatisfiable {
+                                        predicate: format!(
+                                            "ConsistentWith: 値 {s:?} がパターン {spec:?} にマッチしません"
+                                        ),
+                                    });
+                                }
+                                Ok(_) => {}
+                            }
+                        }
+                    }
+                    // レール ID の場合: Mock では検証不可（Z3 バックエンドが必要）
+                }
+
+                // ── Predicate ────────────────────────────────────────────
+                // Predicate AST の充足性は Mock では未評価（Z3 が必要）
+                Constraint::Predicate(_) => {}
             }
         }
 
@@ -382,6 +450,13 @@ pub mod z3_backend {
                         &body_bool,
                     )
                 }
+
+                // Regex — 非解釈ブール変数として表現する。
+                // Z3 の文字列正規表現理論（`str.in_re`）は Rust z3 クレートが未バインドのため、
+                // シンボリック変数 "Regex_<var>" で代替する。具体値評価は verify_constraints で処理済み。
+                Predicate::Regex { var, .. } => {
+                    Bool::new_const(format!("Regex_{var}").as_str())
+                }
             }
         }
     }
@@ -424,6 +499,32 @@ pub mod z3_backend {
                         solver.assert(&Self::predicate_to_bool(pred));
                     }
                     Constraint::NonNull | Constraint::NonEmpty => {}
+
+                    // ── Regex (Z3 バックエンド) ───────────────────────────
+                    // Rust z3 クレートの文字列理論バインディングは限定的なため、
+                    // 具体値がある場合は Rust 側で評価し、シンボリックな場合は通過。
+                    Constraint::Regex { pattern } => {
+                        if let Some(s) = downcast_to_str(value as &dyn Any) {
+                            match regex::Regex::new(pattern) {
+                                Err(e) => {
+                                    return Err(VerificationError::Unsatisfiable {
+                                        predicate: format!(
+                                            "Regex: 無効なパターン {pattern:?}: {e}"
+                                        ),
+                                    });
+                                }
+                                Ok(re) if !re.is_match(s) => {
+                                    return Err(VerificationError::Unsatisfiable {
+                                        predicate: format!(
+                                            "Regex: 値 {s:?} がパターン {pattern:?} にマッチしません"
+                                        ),
+                                    });
+                                }
+                                Ok(_) => {}
+                            }
+                        }
+                    }
+
                     Constraint::ConsistentWith(_) => {}
                 }
             }

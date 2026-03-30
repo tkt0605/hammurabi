@@ -306,6 +306,14 @@ fn collect_pred(pred: &Predicate, vars: &mut Vec<VarInfo>) {
         Predicate::ForAll { body, .. } | Predicate::Exists { body, .. } => {
             collect_pred(body, vars);
         }
+        // Regex(var, pattern) — Constraint::Regex にマップ
+        Predicate::Regex { var, pattern } => {
+            upsert(
+                vars,
+                var,
+                format!("Constraint::Regex {{ pattern: r\"{pattern}\".into() }}"),
+            );
+        }
         // Atom / True / False は変数を持たない
         Predicate::Atom(_) | Predicate::True | Predicate::False => {}
     }
@@ -1123,6 +1131,21 @@ pub fn predicate_to_expr(pred: &Predicate, lang: &TargetLang) -> String {
         Predicate::Exists { var, body } => {
             let be = predicate_to_expr(body, lang);
             format!("/* ∃{var}. {be} */")
+        },
+
+        Predicate::Regex { var, pattern } => match lang {
+            TargetLang::Rust =>
+                format!("Regex::new(r\"{pattern}\").unwrap().is_match(&{var})"),
+            TargetLang::Python =>
+                format!("bool(re.fullmatch(r\"{pattern}\", {var}))"),
+            TargetLang::Go =>
+                format!("regexp.MustCompile(`{pattern}`).MatchString({var})"),
+            TargetLang::Java =>
+                format!("{var}.matches(\"{pattern}\")"),
+            TargetLang::JavaScript =>
+                format!("/{pattern}/.test({var})"),
+            TargetLang::TypeScript =>
+                format!("/{pattern}/.test({var})"),
         },
     }
 }

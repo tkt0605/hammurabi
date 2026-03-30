@@ -411,6 +411,7 @@ dependencies = [
  "hmac",
  "lsp-server",
  "lsp-types",
+ "regex",
  "serde",
  "serde_json",
  "sha2",

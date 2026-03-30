@@ -84,7 +84,8 @@ cargo build --features z3-backend
 
 ### Subcommands
 
-Each command takes **one `.hb` file** as an argument (if you pass a shell glob, only the **first** expanded path is used).
+Only **`hb gen` and `hb check`** take a `.hb` file as direct input.  
+`hb ai` takes a natural-language prompt string, and `hb init` takes no file argument (only `--force`).
 
 ```
 hb gen  <file.hb>   [OPTIONS]   Generate implementation code from contracts in .hb
@@ -93,7 +94,7 @@ hb init [--force]               Create config.hb / .env.example
 hb check <file.hb>  [OPTIONS]   Syntax check + contract verification (no codegen)
 ```
 
-### Shared options (`gen` / `ai`)
+### Shared options (`gen` / `ai` / `check`)
 
 ```
 --config  <path>   Path to config.hb (auto-detected in cwd if omitted)
@@ -104,7 +105,7 @@ hb check <file.hb>  [OPTIONS]   Syntax check + contract verification (no codegen
 --verifier <name>  mock (default) | z3 (requires z3-backend feature)
 ```
 
-`--verifier` applies to **`hb gen` and `hb check`**. For `hb ai` it is parsed but **not** used in the generation flow yet; run `hb check` separately if you need verification after generation.
+`--verifier` applies to **`hb gen` and `hb check`**. In `hb ai`, it is accepted but **not** used in the generation flow; run `hb check` separately when you need post-generation verification.
 
 ### `check` — verify contracts with Mock or Z3
 
@@ -118,7 +119,7 @@ hb check test.hb --verifier mock
 ### Configuration precedence
 
 ```
-CLI args  >  settings inside .hb  >  config.hb  >  .env  >  environment variables
+CLI args  >  config.hb  >  settings inside .hb (fallback for unset fields)  >  .env  >  environment variables
 ```
 
 ### Examples
@@ -215,18 +216,19 @@ A small DSL for Hammurabi. Declaratively describes `ContractualGoal` (logical sp
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `id` | — | Unique identifier for the article. Node key for future dependency graphs (e.g. `safe_divide_v1`) |
+| `id` | — | Unique identifier for the article. Node key for dependency graphs (e.g. `safe_divide_v1`) |
+| `model` | — | Goal-level model PIN (e.g. `gpt-4o@2024-05-13`). Overrides model for that goal in `hb gen` |
+| `depends_on` | — | Dependencies by goal `id` (`[id1, id2]` or `id1, id2`). `hb check` validates existence and cycles |
 | `intent` | — | Design intent in `"""..."""` triple-quoted multiline text. Injected into the AI prompt |
 | `goal` | **yes** | Function name or natural language. Three forms: `goal: name`, `goal: name "label"`, `goal: "natural language only"` |
 | `inputs` | — | Typed input parameters (e.g. `inputs: dividend: i64, divisor: i64`). Reflected in generated function signatures |
 | `output` | — | Return type (e.g. `output: Result<i64, String>`). Reflected in generated return types |
 | `examples` | — | Concrete I/O examples (`[...]` block). Used for automatic test code generation |
-| `context` | — | Design background / bullet points (legacy feature) |
 | `settings` | — | Predicate constraint block (`require` / `ensure` / `invariant` / `forbid`) |
 
 > **Note:** When using `goal: "natural language only"`, `settings:` can be omitted — the AI infers constraints automatically.
 
-### Three forms of `goal`
+### Three forms of `goal` (inside a `define` block)
 
 ```hb
 // 1. Identifier only (legacy compatible)
@@ -274,6 +276,7 @@ When running `hb gen`, language-specific test code is auto-generated (Rust: `#[t
 | `Not(p)` | Negation of predicate `p` |
 | `And(p1, p2)` | Both `p1` and `p2` hold |
 | `Equals(a, b)` | `a` equals `b` |
+| `Regex(var, "pattern")` | String `var` matches regex `pattern` |
 | `When(cond, cons)` | If `cond` then `cons` (implication) |
 | `<atom>` | Atomic predicate (interpreted by the Verifier) |
 
@@ -530,11 +533,11 @@ Register the binary as an LSP server in your editor (VS Code, etc.) for `.hb` ed
 | ✅ | `inputs:` / `output:` — typed parameters & return types reflected in generated signatures |
 | ✅ | `examples:` — I/O examples with per-language test auto-generation (6 languages) |
 | ✅ | `intent:` — triple-quoted multiline prompt for AI context enrichment |
-| ✅ | `id:` — unique article identifier (foundation for dependency graphs) |
-| ⏳ | Inter-article dependency graph (`id`-based `depends_on`) |
+| ✅ | `id:` — unique article identifier (node key for dependency graph) |
+| ✅ | `depends_on:` — inter-article dependency graph (existence/cycle checks + AI prompt integration) |
 | ⏳ | Publish VS Code extension |
-| ⏳ | Z3 encoding for `ForAll` / `Exists` quantifiers |
-| ⏳ | New `Constraint` types (e.g. regex) |
+| ✅ | Z3 encoding for `ForAll` / `Exists` quantifiers (baseline) |
+| ✅ | Regex constraint support (`Regex`) in parsing, verification, and codegen |
 | ⏳ | Publish on crates.io |
 
 ---
@@ -546,7 +549,7 @@ Issues, pull requests, and stars are welcome.
 We especially appreciate help with:
 
 - **Richer predicate logic** — Z3 encoding for `ForAll` / `Exists`
-- **New `Constraint` types** — regex, type-class-like constraints, etc.
+- **Constraint evolution** — hardening `Regex`, type-class-like constraints, etc.
 - **More tests** — edge cases and counterexamples
 - **Documentation** — design articles, tutorials
 

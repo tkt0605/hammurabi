@@ -475,7 +475,27 @@ fn cmd_gen(path: &str, opts: &CommonOpts) {
         // needs_ai な goal は自然言語から制約を AI で生成する
         let expanded: ContractualGoal;
         let goal: &ContractualGoal = if pg.needs_ai {
-            let desc = pg.label.as_deref().unwrap_or(&pg.goal.name);
+            // depends_on で参照された goal の契約を収集
+            let dep_goals: Vec<&ContractualGoal> = pg.depends_on.iter()
+                .filter_map(|dep_id| {
+                    result.goals.iter().find(|g| g.id.as_deref() == Some(dep_id.as_str()))
+                        .map(|g| &g.goal)
+                })
+                .collect();
+            // プロンプトに依存先契約・型・例を統合
+            let desc = hammurabi::ai_gen::build_goal_description(
+                &pg.goal.name,
+                pg.label.as_deref(),
+                pg.intent.as_deref(),
+                &pg.goal.inputs,
+                pg.goal.output.as_deref(),
+                &pg.goal.examples,
+                &dep_goals,
+            );
+            if !dep_goals.is_empty() {
+                let dep_ids = pg.depends_on.join(", ");
+                println!("  🔗  依存: [{dep_ids}]");
+            }
             let display_name = if let Some(lbl) = &pg.label {
                 format!("`{}` (\"{}\")", pg.goal.name, lbl)
             } else {
@@ -483,7 +503,7 @@ fn cmd_gen(path: &str, opts: &CommonOpts) {
             };
             println!("  Goal #{}: {} ⚡ 自然言語から AI が制約を生成", i + 1, display_name);
             println!("─────────────────────────────────────────────────");
-            println!("  説明: {desc}");
+            println!("  説明: {}", pg.label.as_deref().unwrap_or(&pg.goal.name));
             println!("⏳  制約を生成中…\n");
             // goal レベルの model: が指定されていれば専用 generator を生成してモデルを上書き
             let goal_generator;
@@ -501,7 +521,7 @@ fn cmd_gen(path: &str, opts: &CommonOpts) {
                 generator.as_ref().unwrap().as_ref()
             };
 
-            match active_generator.generate(desc) {
+            match active_generator.generate(&desc) {
                 Ok(output) => {
                     if let Some(mut gen_goal) = output.goals.into_iter().next() {
                         // .hb で指定された inputs/output/examples/id を AI 生成ゴールに引き継ぐ
@@ -759,6 +779,100 @@ fn cmd_check(path: &str, verifier_kind: &VerifierKind) {
         }
         if has_dup {
             process::exit(1);
+        }
+    }
+
+    // depends_on 検証 + 循環検出 + グラフ表示
+    {
+        use std::collections::{HashMap, HashSet};
+
+        // id → goal_name の逆引きマップ
+        let id_map: HashMap<&str, &str> = result.goals.iter()
+            .filter_map(|pg| pg.id.as_deref().map(|id| (id, pg.goal.name.as_str())))
+            .collect();
+
+        let has_any_deps = result.goals.iter().any(|pg| !pg.depends_on.is_empty());
+
+        // ── 存在検証 ────────────────────────────────────────────────
+        let mut dep_error = false;
+        for pg in &result.goals {
+            for dep_id in &pg.depends_on {
+                if !id_map.contains_key(dep_id.as_str()) {
+                    println!("❌  依存解決失敗: `{}` が参照する `{dep_id}` は存在しません（id: が未定義か typo）",
+                        pg.id.as_deref().unwrap_or(&pg.goal.name));
+                    dep_error = true;
+                }
+            }
+        }
+        if dep_error { process::exit(1); }
+
+        // ── 循環検出（DFS）───────────────────────────────────────────
+        // id → depends_on ids の隣接リスト
+        let adj: HashMap<&str, Vec<&str>> = result.goals.iter()
+            .filter_map(|pg| {
+                pg.id.as_deref().map(|id| {
+                    let deps: Vec<&str> = pg.depends_on.iter()
+                        .map(|s| s.as_str())
+                        .collect();
+                    (id, deps)
+                })
+            })
+            .collect();
+
+        fn dfs_cycle<'a>(
+            node:     &'a str,
+            adj:      &HashMap<&'a str, Vec<&'a str>>,
+            visited:  &mut HashSet<&'a str>,
+            in_stack: &mut Vec<&'a str>,
+        ) -> Option<Vec<String>> {
+            visited.insert(node);
+            in_stack.push(node);
+            if let Some(deps) = adj.get(node) {
+                for &dep in deps {
+                    if in_stack.contains(&dep) {
+                        let mut cycle = in_stack.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+                        cycle.push(dep.to_string());
+                        return Some(cycle);
+                    }
+                    if !visited.contains(dep) {
+                        if let Some(cycle) = dfs_cycle(dep, adj, visited, in_stack) {
+                            return Some(cycle);
+                        }
+                    }
+                }
+            }
+            in_stack.pop();
+            None
+        }
+
+        let mut visited: HashSet<&str> = HashSet::new();
+        for id in adj.keys() {
+            if !visited.contains(id) {
+                let mut stack: Vec<&str> = Vec::new();
+                if let Some(cycle) = dfs_cycle(id, &adj, &mut visited, &mut stack) {
+                    println!("❌  依存グラフに循環があります: {}", cycle.join(" → "));
+                    process::exit(1);
+                }
+            }
+        }
+
+        // ── 依存グラフ表示 ─────────────────────────────────────────
+        if has_any_deps {
+            println!();
+            println!("── 依存グラフ ─────────────────────────────────────────────────");
+            for pg in &result.goals {
+                if pg.depends_on.is_empty() { continue; }
+                let node_label = pg.id.as_deref().unwrap_or(&pg.goal.name);
+                println!("  {node_label}");
+                for (i, dep_id) in pg.depends_on.iter().enumerate() {
+                    let dep_name = id_map.get(dep_id.as_str())
+                        .map(|n| format!(" (`{n}`)"))
+                        .unwrap_or_default();
+                    let branch = if i + 1 == pg.depends_on.len() { "└─" } else { "├─" };
+                    println!("  {branch} {dep_id}{dep_name}");
+                }
+            }
+            println!("  ✅  循環なし");
         }
     }
 

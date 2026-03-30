@@ -163,11 +163,13 @@ impl AiGoalGenerator for MockAiGenerator {
     }
 }
 
-/// キーワード解析で .hb テキストを構築する。
+/// キーワード解析で .hb テキストをブロック形式で構築する。
 fn build_hb_from_keywords(desc: &str) -> String {
     let lower = desc.to_lowercase();
     let fn_name = infer_function_name(&lower);
-    let mut lines: Vec<String> = vec![format!("goal: {fn_name}")];
+
+    // settings ブロック内の行を収集する
+    let mut settings: Vec<String> = Vec::new();
 
     // ── 変数候補を抽出 ────────────────────────────────────────────────
     let vars = extract_variable_names(&lower);
@@ -180,15 +182,15 @@ fn build_hb_from_keywords(desc: &str) -> String {
         || lower.contains("nullpointer")
     {
         for v in vars.iter().filter(|v| looks_like_ref(v)) {
-            lines.push(format!("  require: NonNull({v})"));
+            settings.push(format!("      require: NonNull({v})"));
         }
     }
 
     // ── 文字列/スライス引数は常に NonNull ────────────────────────────
     for v in vars.iter().filter(|v| is_string_like(v, &lower)) {
-        let entry = format!("  require: NonNull({v})");
-        if !lines.contains(&entry) {
-            lines.push(entry);
+        let entry = format!("      require: NonNull({v})");
+        if !settings.contains(&entry) {
+            settings.push(entry);
         }
     }
 
@@ -200,7 +202,7 @@ fn build_hb_from_keywords(desc: &str) -> String {
 
     if lower.contains("positive") || lower.contains("greater than zero") {
         for v in &numeric_vars {
-            lines.push(format!("  require: InRange({v}, 1, 9223372036854775807)"));
+            settings.push(format!("      require: InRange({v}, 1, 9223372036854775807)"));
         }
     } else if lower.contains("non-negative")
         || lower.contains("nonnegative")
@@ -208,20 +210,19 @@ fn build_hb_from_keywords(desc: &str) -> String {
         || lower.contains("zero or more")
     {
         for v in &numeric_vars {
-            lines.push(format!("  require: InRange({v}, 0, 9223372036854775807)"));
+            settings.push(format!("      require: InRange({v}, 0, 9223372036854775807)"));
         }
     } else if lower.contains("non-zero") || lower.contains("not zero") || lower.contains("nonzero") {
         for v in &numeric_vars {
-            lines.push(format!(
-                "  require: Or(InRange({v}, -9223372036854775808, -1), \
-                               InRange({v}, 1, 9223372036854775807))"
+            settings.push(format!(
+                "      require: Or(InRange({v}, -9223372036854775808, -1), \
+                                   InRange({v}, 1, 9223372036854775807))"
             ));
         }
     } else {
-        // 範囲制約なしでもデフォルトの全範囲を追加
         for v in &numeric_vars {
-            lines.push(format!(
-                "  require: InRange({v}, -9223372036854775808, 9223372036854775807)"
+            settings.push(format!(
+                "      require: InRange({v}, -9223372036854775808, 9223372036854775807)"
             ));
         }
     }
@@ -229,25 +230,29 @@ fn build_hb_from_keywords(desc: &str) -> String {
     // ── 事後条件 ──────────────────────────────────────────────────────
     let ensures = infer_postconditions(&lower, &fn_name);
     for e in ensures {
-        lines.push(format!("  ensure: {e}"));
+        settings.push(format!("      ensure: {e}"));
     }
 
     // ── 不変条件 ──────────────────────────────────────────────────────
     if lower.contains("thread") || lower.contains("concurrent") || lower.contains("parallel") {
-        lines.push("  invariant: thread_safe".into());
+        settings.push("      invariant: thread_safe".into());
     }
     if lower.contains("memory") || lower.contains("pointer") || lower.contains("reference") {
-        lines.push("  invariant: no_memory_aliasing".into());
+        settings.push("      invariant: no_memory_aliasing".into());
     }
 
     // ── 禁止パターン（常に追加） ─────────────────────────────────────
-    lines.push("  forbid: RuntimeNullCheck".into());
-    lines.push("  forbid: UnprovenUnwrap".into());
+    settings.push("      forbid: RuntimeNullCheck".into());
+    settings.push("      forbid: UnprovenUnwrap".into());
     if lower.contains("branch") || lower.contains("match") || lower.contains("exhaustive") {
-        lines.push("  forbid: NonExhaustiveBranch".into());
+        settings.push("      forbid: NonExhaustiveBranch".into());
     }
 
-    lines.join("\n")
+    // ── ブロック形式で組み立て ────────────────────────────────────────
+    format!(
+        "{{\n  define: {{\n    goal: {fn_name}\n    settings: [\n{rows}\n    ]\n  }}\n}}",
+        rows = settings.join("\n"),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -643,6 +648,7 @@ fn predicate_to_hb(p: &Predicate) -> String {
         Predicate::InRange { var, min, max } => format!("InRange({var}, {min}, {max})"),
         Predicate::NonNull(v)      => format!("NonNull({v})"),
         Predicate::Equals(a, b)    => format!("Equals({a}, {b})"),
+        Predicate::Regex { var, pattern } => format!("Regex({var}, \"{pattern}\")"),
     }
 }
 
@@ -764,14 +770,16 @@ pub fn hb_to_output(raw_hb: String, extra_context: &str) -> Result<AiGenOutput, 
     Ok(AiGenOutput { goals, raw_hb, warnings })
 }
 
-/// `define` ブロックのラベル・インテントを組み合わせて AI プロンプト用の説明文を作る。
+/// `define` ブロックのラベル・インテント・依存先契約を組み合わせて AI プロンプト用の説明文を作る。
+/// `dep_goals`: depends_on で参照された ContractualGoal のスライス（依存先の契約をコンテキストとして含める）
 pub fn build_goal_description(
-    goal_name: &str,
-    label:     Option<&str>,
-    intent:    Option<&str>,
-    inputs:    &[crate::lang::goal::Param],
-    output:    Option<&str>,
-    examples:  &[crate::lang::goal::Example],
+    goal_name:    &str,
+    label:        Option<&str>,
+    intent:       Option<&str>,
+    inputs:       &[crate::lang::goal::Param],
+    output:       Option<&str>,
+    examples:     &[crate::lang::goal::Example],
+    dep_goals:    &[&crate::lang::goal::ContractualGoal],
 ) -> String {
     let mut parts = Vec::new();
     if let Some(l) = label.filter(|s| !s.trim().is_empty()) {
@@ -799,6 +807,32 @@ pub fn build_goal_description(
             format!("  - {}({}) => {}", label, ex.inputs_raw, ex.output_raw)
         }).collect();
         parts.push(format!("Examples:\n{}", ex_lines.join("\n")));
+    }
+    // 依存先ゴールの契約をコンテキストとして追加（AI がインターフェースを正確に把握できる）
+    if !dep_goals.is_empty() {
+        let dep_lines: Vec<String> = dep_goals.iter().map(|g| {
+            let id_label = g.id.as_deref().unwrap_or(&g.name);
+            let mut lines = vec![format!("Dependency `{id_label}` ({}):", g.name)];
+            if !g.preconditions.is_empty() {
+                lines.push(format!("  require : {}", g.preconditions.iter()
+                    .map(|p| p.to_string()).collect::<Vec<_>>().join(" ∧ ")));
+            }
+            if !g.postconditions.is_empty() {
+                lines.push(format!("  ensure  : {}", g.postconditions.iter()
+                    .map(|p| p.to_string()).collect::<Vec<_>>().join(" ∧ ")));
+            }
+            if !g.inputs.is_empty() {
+                let sig = g.inputs.iter()
+                    .map(|p| format!("{}: {}", p.name, p.type_str))
+                    .collect::<Vec<_>>().join(", ");
+                lines.push(format!("  inputs  : ({sig})"));
+            }
+            if let Some(ref out) = g.output {
+                lines.push(format!("  output  : {out}"));
+            }
+            lines.join("\n")
+        }).collect();
+        parts.push(format!("Dependencies (already implemented contracts):\n{}", dep_lines.join("\n\n")));
     }
     if parts.is_empty() {
         goal_name.to_owned()

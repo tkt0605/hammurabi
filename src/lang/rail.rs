@@ -72,7 +72,16 @@ pub enum Constraint {
     NonNull,
     /// コレクションが空でないこと
     NonEmpty,
+    /// 文字列値が正規表現パターンにマッチすること（文字列制約の実用性向上）
+    ///
+    /// `pattern` は Rust の `regex` クレートが受け付ける正規表現構文。
+    /// 例: `Regex { pattern: r"^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$".into() }`
+    Regex { pattern: String },
     /// 他レールとの整合性（クロスレール制約）
+    ///
+    /// `spec` は以下の2種類の意味を持つ:
+    /// 1. 正規表現パターン（`^` で始まる、または `[`/`*`/`+` を含む）→ 文字列値に対して即時評価
+    /// 2. レール ID（その他の文字列）                                  → Z3 バックエンドで解決
     ConsistentWith(String),
 }
 
@@ -82,8 +91,9 @@ impl fmt::Display for Constraint {
             Self::Predicate(p)         => write!(f, "Predicate({p})"),
             Self::InRange { min, max } => write!(f, "InRange[{min}, {max}]"),
             Self::NonNull              => write!(f, "NonNull"),
-            Self::NonEmpty             => write!(f, "NonEmpty"),
-            Self::ConsistentWith(id)   => write!(f, "ConsistentWith({id})"),
+            Self::NonEmpty                  => write!(f, "NonEmpty"),
+            Self::Regex { pattern }         => write!(f, "Regex({pattern})"),
+            Self::ConsistentWith(id)        => write!(f, "ConsistentWith({id})"),
         }
     }
 }

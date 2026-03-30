@@ -85,7 +85,8 @@ cargo build --features z3-backend
 
 ### サブコマンド一覧
 
-各コマンドは **1 つの `.hb` ファイル** を引数に取る（ワイルドカードで複数ファイルを一度に渡しても、先頭の 1 ファイルだけが使われる）。
+`.hb` ファイルを直接入力に取るのは **`hb gen` と `hb check`**。  
+`hb ai` は自然言語プロンプト文字列、`hb init` は引数不要（`--force` のみ）です。
 
 ```
 hb gen  <file.hb>   [OPTIONS]   .hb の契約から実装コードを生成
@@ -94,7 +95,7 @@ hb init [--force]               config.hb / .env.example を作成
 hb check <file.hb>  [OPTIONS]   構文チェック + 契約検証（コード生成なし）
 ```
 
-### 共通オプション（`gen` / `ai`）
+### 共通オプション（`gen` / `ai` / `check`）
 
 ```
 --config  <path>   config.hb のパス（省略時はカレントディレクトリを自動検索）
@@ -105,7 +106,7 @@ hb check <file.hb>  [OPTIONS]   構文チェック + 契約検証（コード生
 --verifier <name>  mock（既定）| z3（要 z3-backend feature）
 ```
 
-`--verifier` は **`hb gen` と `hb check` で有効**。`hb ai` は現状パースのみで生成フローには使わない（生成後の検証が必要なら `hb check` を別途実行）。
+`--verifier` は **`hb gen` と `hb check` で有効**。`hb ai` では受理されるが検証フローには使われない（生成後の検証が必要なら `hb check` を別途実行）。
 
 ### `check` 専用（契約の整合性を Mock または Z3 で検証）
 
@@ -119,7 +120,7 @@ hb check test.hb --verifier mock
 ### 設定の優先順位
 
 ```
-CLI 引数  >  .hb ファイル内の指定  >  config.hb  >  .env  >  環境変数
+CLI 引数  >  config.hb  >  .hb ファイル内の指定（未指定項目のみ補完）  >  .env  >  環境変数
 ```
 
 ### 使用例
@@ -216,18 +217,19 @@ Hammurabi 専用の DSL。`ContractualGoal`（関数の論理仕様）を宣言�
 
 | フィールド | 必須 | 説明 |
 |-----------|------|------|
-| `id` | — | 条文の一意識別子。将来の依存関係グラフのノードキー（例: `safe_divide_v1`） |
+| `id` | — | 条文の一意識別子。依存関係グラフのノードキー（例: `safe_divide_v1`） |
+| `model` | — | この goal 専用のモデル PIN（例: `gpt-4o@2024-05-13`）。`hb gen` で goal 単位に上書き |
+| `depends_on` | — | 依存する goal の `id` 一覧（`[id1, id2]` または `id1, id2`）。`hb check` で存在・循環を検証 |
 | `intent` | — | 設計意図を `"""..."""` トリプルクォートで複数行記述。AI プロンプトに使われる |
 | `goal` | **必須** | 関数名または自然言語。`goal: name`、`goal: name "説明"`、`goal: "自然言語のみ"` の 3 形式 |
 | `inputs` | — | 入力パラメータの型宣言（例: `inputs: dividend: i64, divisor: i64`）。コード生成のシグネチャに反映 |
 | `output` | — | 返り値の型（例: `output: Result<i64, String>`）。コード生成の戻り値に反映 |
 | `examples` | — | 具体的な入出力例（`[...]` ブロック）。テストコード自動生成に使われる |
-| `context` | — | 設計の背景・箇条書き（従来機能） |
 | `settings` | — | 述語制約ブロック（`require` / `ensure` / `invariant` / `forbid`） |
 
 > **Note:** `goal: "自然言語のみ"` の形式では `settings:` を省略でき、AI が制約を自動生成する。
 
-### `goal` の 3 つの記法
+### `goal` の 3 つの記法（`define` ブロック内）
 
 ```hb
 // 1. 識別子のみ（従来互換）
@@ -275,6 +277,7 @@ examples: [
 | `Not(p)` | 述語 `p` の否定 |
 | `And(p1, p2)` | 述語 `p1` かつ `p2` が成立すること |
 | `Equals(a, b)` | `a` と `b` が等しいこと |
+| `Regex(var, "pattern")` | 文字列 `var` が正規表現 `pattern` にマッチすること |
 | `When(cond, cons)` | `cond` ならば `cons`（含意） |
 | `<atom>` | 任意のアトム述語（意味は Verifier が解釈） |
 
@@ -532,11 +535,11 @@ cargo build --bin hammurabi_lsp
 | ✅ | `inputs:` / `output:` — 型付きパラメータ・返り値宣言（コード生成シグネチャ反映） |
 | ✅ | `examples:` — 入出力例と言語別テストコード自動生成（6言語対応） |
 | ✅ | `intent:` — トリプルクォート複数行プロンプト（AI コンテキスト強化） |
-| ✅ | `id:` — 条文の一意識別子（将来の依存グラフの基盤） |
-| ⏳ | 条文間の依存関係グラフ（`id` ベースの `depends_on`） |
+| ✅ | `id:` — 条文の一意識別子（依存グラフのノードキー） |
+| ✅ | `depends_on:` — 条文間の依存関係グラフ（存在検証・循環検出・AIプロンプト連携） |
 | ⏳ | VS Code 拡張の公開 |
-| ⏳ | `ForAll` / `Exists` 量化述語の Z3 エンコード実装 |
-| ⏳ | 正規表現制約など新しい `Constraint` タイプ |
+| ✅ | `ForAll` / `Exists` 量化述語の Z3 エンコード（基礎実装） |
+| ✅ | 正規表現制約（`Regex`）の導入（パース・検証・コード生成） |
 | ⏳ | `crates.io` への公開 |
 
 ---
@@ -548,7 +551,7 @@ Issue・PR・Star すべて歓迎です。
 特に以下の領域での貢献を求めています。
 
 - **述語論理の拡張** — `ForAll`/`Exists` の Z3 量化器エンコード実装
-- **新しい `Constraint` タイプ** — 正規表現制約、型クラス制約 など
+- **制約表現の拡張** — `Regex` の堅牢化、型クラス制約 など
 - **テストケース追加** — エッジケースや反例の充実
 - **ドキュメント** — 英語 README、設計解説記事
 

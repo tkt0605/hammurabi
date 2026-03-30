@@ -38,6 +38,11 @@ pub enum Predicate {
     NonNull(String),
     /// 等値制約
     Equals(String, String),
+    /// 変数が正規表現パターンにマッチすること
+    ///
+    /// `.hb` ファイルでは `Regex(var, "pattern")` と記述する。
+    /// 例: `require: Regex(email, "^[a-z0-9._%+-]+@[a-z0-9.-]+\\.[a-z]{2,}$")`
+    Regex { var: String, pattern: String },
 }
 
 impl Predicate {
@@ -69,6 +74,9 @@ impl Predicate {
     pub fn non_null(var: impl Into<String>) -> Self {
         Self::NonNull(var.into())
     }
+    pub fn regex(var: impl Into<String>, pattern: impl Into<String>) -> Self {
+        Self::Regex { var: var.into(), pattern: pattern.into() }
+    }
 }
 
 impl fmt::Display for Predicate {
@@ -86,6 +94,7 @@ impl fmt::Display for Predicate {
             Predicate::InRange { var, min, max } => write!(f, "{min} ≤ {var} ≤ {max}"),
             Predicate::NonNull(v) => write!(f, "NonNull({v})"),
             Predicate::Equals(a, b) => write!(f, "{a} = {b}"),
+            Predicate::Regex { var, pattern } => write!(f, "Regex({var}, \"{pattern}\")"),
         }
     }
 }
@@ -201,6 +210,9 @@ pub struct ContractualGoal {
     pub id:             Option<String>,
     /// AI モデルバージョン固定（再現性の基盤）。`model: gpt-4o@2024-05-13` で指定。
     pub model_pin:      Option<String>,
+    /// このゴールが依存するゴールの ID リスト。`depends_on: [id1, id2]` で指定。
+    /// 依存先ゴールの契約が AI プロンプトに自動的に組み込まれる。
+    pub depends_on:     Vec<String>,
     /// 関数の入力パラメータ。指定された場合はコード生成のシグネチャに使われる。
     pub inputs:         Vec<Param>,
     /// 関数の返り値型（Rust スタイル）。指定された場合はコード生成の戻り値に使われる。
@@ -219,6 +231,7 @@ impl ContractualGoal {
             name:           name.into(),
             id:             None,
             model_pin:      None,
+            depends_on:     Vec::new(),
             inputs:         Vec::new(),
             output:         None,
             examples:       Vec::new(),
@@ -269,6 +282,7 @@ impl ContractualGoal {
     }
 
     /// 全ての事後条件が事前条件のもとで意味を持つか静的チェック（形式検証は Verifier に委ねる）
+    /// 全ての事後条件が事前条件のもとで意味を持つか静的チェック（形式検証は Verifier に委ねる）
     pub fn is_well_formed(&self) -> bool {
         !self.postconditions.is_empty()
     }
@@ -282,6 +296,9 @@ impl fmt::Display for ContractualGoal {
         }
         if let Some(ref model) = self.model_pin {
             writeln!(f, "  model     : {model}")?;
+        }
+        if !self.depends_on.is_empty() {
+            writeln!(f, "  depends_on: [{}]", self.depends_on.join(", "))?;
         }
         if !self.inputs.is_empty() {
             let params = self.inputs.iter()
