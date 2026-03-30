@@ -164,33 +164,106 @@ cargo install --path . --features full # Example: full local install
 A small DSL for Hammurabi. Declaratively describes `ContractualGoal` (logical specification of a function).
 
 ```hb
-// File-level settings（Before Define Block）
+// File-level settings (before define blocks)
 // agent:   openai              // openai | anthropic | mock
 // model:   gpt-4o              // default per agent if omitted
 // lang:    python              // rust | python | go | java | javascript | typescript
 // api_key: $OPENAI_API_KEY    // prefer .env
 
-// Define Block（Detailed information about what you will be making is listed here.）
 {
-    define: {
-        // When using an agent, please include detailed design information here. Bullet points are acceptable.
-        context: [
-            - <Context01>
-            - <Context02>
-        ]
-        goal: <Write down what you want to create (currently a function).>
-        settings: [
-            require:   Or(InRange(divisor, -9223372036854775808, -1), InRange(divisor, 1, 9223372036854775807))
-            require:   InRange(dividend, -9223372036854775808, 9223372036854775807)
-            ensure:    result_is_finite
-            ensure:    result_within_i64_range
-            invariant: no_memory_aliasing
-            forbid:    RuntimeNullCheck
-            forbid:    UnprovenUnwrap
-        ]
-    }
+  // ── Natural-language goal + typed I/O + examples ──────
+  define: {
+    id:    safe_divide_v1
+    goal: "Safely divide two integers. Zero division must be physically impossible"
+    inputs: dividend: i64, divisor: i64
+    output: Result<i64, String>
+    examples: [
+      - "normal":      (10, 2)  => Ok(5)
+      - "indivisible": (7, 3)   => Ok(2)
+      - "zero div":    (7, 0)   => Err("division by zero")
+      - "negative":    (-6, 3)  => Ok(-2)
+    ]
+  }
+
+  // ── intent + explicit constraints + examples ──────────
+  define: {
+    id:    bound_check_v1
+    intent: """
+      Physically eliminate zero division and prevent system halts.
+      Values outside the 0–10 range are safely ignored as None.
+    """
+    goal: brace_demo_goal "Safely handle bounded integer n"
+    inputs: n: i32
+    output: Option<i32>
+    examples: [
+      - (0)   => Some(0)
+      - (5)   => Some(5)
+      - (10)  => Some(10)
+      - (-1)  => None
+      - (11)  => None
+    ]
+    settings: [
+      require: InRange(n, 0, 10)
+      ensure: n_ok
+      forbid: UnprovenUnwrap
+    ]
+  }
 }
 ```
+
+### `define` block fields
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `id` | — | Unique identifier for the article. Node key for future dependency graphs (e.g. `safe_divide_v1`) |
+| `intent` | — | Design intent in `"""..."""` triple-quoted multiline text. Injected into the AI prompt |
+| `goal` | **yes** | Function name or natural language. Three forms: `goal: name`, `goal: name "label"`, `goal: "natural language only"` |
+| `inputs` | — | Typed input parameters (e.g. `inputs: dividend: i64, divisor: i64`). Reflected in generated function signatures |
+| `output` | — | Return type (e.g. `output: Result<i64, String>`). Reflected in generated return types |
+| `examples` | — | Concrete I/O examples (`[...]` block). Used for automatic test code generation |
+| `context` | — | Design background / bullet points (legacy feature) |
+| `settings` | — | Predicate constraint block (`require` / `ensure` / `invariant` / `forbid`) |
+
+> **Note:** When using `goal: "natural language only"`, `settings:` can be omitted — the AI infers constraints automatically.
+
+### Three forms of `goal`
+
+```hb
+// 1. Identifier only (legacy compatible)
+goal: safe_division
+
+// 2. Identifier + natural-language label
+goal: safe_division "Safe division that prevents zero division"
+
+// 3. Natural language only (identifier auto-generated, AI infers settings)
+goal: "Safely divide two integers"
+```
+
+### `intent` — multiline design intent
+
+```hb
+intent: """
+  Physically eliminate zero division and prevent system halts.
+  Values outside the 0–10 range are safely ignored as None.
+"""
+```
+
+Triple-quoted `"""` multiline text. Included in AI agent prompts to strengthen code generation context.
+
+### `examples` — I/O examples and auto-generated tests
+
+```hb
+examples: [
+  - "normal division": (10, 2)  => Ok(5)
+  - "zero division":   (7, 0)   => Err("division by zero")
+  - (5)  => Some(5)
+  - (-1) => None
+]
+```
+
+Each line follows the `- [label:] (inputs) => output` format. Labels are optional.  
+When running `hb gen`, language-specific test code is auto-generated (Rust: `#[test]`, Python: pytest, Go: `testing.T`, Java: JUnit, JS/TS: Jest).
+
 ### Predicates
 
 | Predicate | Meaning |
@@ -198,6 +271,10 @@ A small DSL for Hammurabi. Declaratively describes `ContractualGoal` (logical sp
 | `NonNull(x)` | Variable `x` is not null |
 | `InRange(x, min, max)` | `x` lies in `[min, max]` |
 | `Or(p1, p2)` | Predicate `p1` or `p2` holds |
+| `Not(p)` | Negation of predicate `p` |
+| `And(p1, p2)` | Both `p1` and `p2` hold |
+| `Equals(a, b)` | `a` equals `b` |
+| `When(cond, cons)` | If `cond` then `cons` (implication) |
 | `<atom>` | Atomic predicate (interpreted by the Verifier) |
 
 ### Forbidden patterns (`forbid`)
@@ -208,6 +285,7 @@ A small DSL for Hammurabi. Declaratively describes `ContractualGoal` (logical sp
 | `UnprovenUnwrap` | No `unwrap()` / `!` without proof |
 | `NonExhaustiveBranch` | Non-exhaustive branches forbidden |
 | `CatchAllSuppression` | No catch-all suppression (`_ =>`, etc.) |
+| `ImplicitCoercion` | No implicit type coercions |
 
 ---
 
@@ -245,19 +323,22 @@ hammurabi/
 #### `hb gen` — codegen from `.hb`
 
 ```
-[.hb file]  goal blocks
+[.hb file]  define blocks (id / intent / goal / inputs / output / examples / settings)
     │
     ▼
 [LSP parser]  parse_hb() — text → Vec<ContractualGoal>
+    │  goal: "natural language" only → AI auto-infers settings
     │  syntax issues → warnings / errors
     ▼
 [Verifier]  Only when `--verifier z3`: prove specs with Z3 (abort codegen on failure)
     │  Default mock: gen does not verify here (use `hb check` anytime)
     ▼
 [CodeWriter]  ContractualGoal → per-language skeleton
+    │          inputs/output → reflected in function signatures
+    │          examples → language-specific test code auto-generated
     │          Non-mock agents: AI may emit full implementations
     ▼
-[Output]  Rust / Python / Go / Java / JavaScript / TypeScript
+[Output]  Rust / Python / Go / Java / JavaScript / TypeScript + test code
 ```
 
 #### `hb ai` — goals from natural language
@@ -284,9 +365,12 @@ hammurabi/
 Describe *what* must hold without imperative noise.
 
 ```rust
-use hammurabi::lang::goal::{ContractualGoal, ForbiddenPattern, Predicate};
+use hammurabi::lang::goal::{ContractualGoal, ForbiddenPattern, Predicate, Param, Example};
 
 let goal = ContractualGoal::new("safe_division")
+    .with_input("dividend", "i64")
+    .with_input("divisor", "i64")
+    .with_output("Result<i64, String>")
     .require(Predicate::or(
         Predicate::in_range("divisor", i64::MIN, -1),
         Predicate::in_range("divisor",  1, i64::MAX),
@@ -294,9 +378,32 @@ let goal = ContractualGoal::new("safe_division")
     .ensure(Predicate::atom("result_is_finite"))
     .invariant(Predicate::atom("no_memory_aliasing"))
     .forbid(ForbiddenPattern::RuntimeNullCheck);
+
+// Unique id for future dependency graphs
+goal.id = Some("safe_divide_v1".into());
+
+// Examples drive automatic test generation
+goal.examples.push(Example::new(
+    Some("normal division".into()), "10, 2", "Ok(5)",
+));
 ```
 
 You do **not** write `if divisor == 0 { return Err(...) }` — divisors are constrained at the specification level.
+
+#### `ContractualGoal` fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | `String` | Function name (identifier) |
+| `id` | `Option<String>` | Unique identifier. Node key for dependency graphs |
+| `inputs` | `Vec<Param>` | Typed input parameters (`name: type`) |
+| `output` | `Option<String>` | Return type string |
+| `examples` | `Vec<Example>` | I/O examples. Used for auto test generation |
+| `preconditions` | `Vec<Predicate>` | Preconditions (`require`) |
+| `postconditions` | `Vec<Predicate>` | Postconditions (`ensure`) |
+| `invariants` | `Vec<Predicate>` | Invariants (`invariant`) |
+| `forbidden` | `Vec<ForbiddenPattern>` | Forbidden patterns (`forbid`) |
+| `model_pin` | `Option<String>` | Pin AI model version for reproducibility |
 
 ---
 
@@ -419,6 +526,12 @@ Register the binary as an LSP server in your editor (VS Code, etc.) for `.hb` ed
 | ✅ | `hb` CLI — subcommands (`gen` / `ai` / `init` / `check`) |
 | ✅ | LSP server — completion, diagnostics, hover for `.hb` |
 | ✅ | Browser build via WASM (`wasm` feature) |
+| ✅ | `goal:` natural-language support — `goal: "text"` lets AI auto-infer constraints |
+| ✅ | `inputs:` / `output:` — typed parameters & return types reflected in generated signatures |
+| ✅ | `examples:` — I/O examples with per-language test auto-generation (6 languages) |
+| ✅ | `intent:` — triple-quoted multiline prompt for AI context enrichment |
+| ✅ | `id:` — unique article identifier (foundation for dependency graphs) |
+| ⏳ | Inter-article dependency graph (`id`-based `depends_on`) |
 | ⏳ | Publish VS Code extension |
 | ⏳ | Z3 encoding for `ForAll` / `Exists` quantifiers |
 | ⏳ | New `Constraint` types (e.g. regex) |

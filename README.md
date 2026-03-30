@@ -171,27 +171,99 @@ Hammurabi 専用の DSL。`ContractualGoal`（関数の論理仕様）を宣言�
 // lang:    python              // rust | python | go | java | javascript | typescript
 // api_key: $OPENAI_API_KEY    // API キー（.env 推奨）
 
-//defineブロック（ここに作るものの詳細情報を記載。）
 {
-    define: {
-        // エージェントを用いる際には、ここに詳細な設計情報を記載。箇条書きOK
-        context: [
-            - <内容01>
-            - <内容02>
-        ]
-        goal: <作りたいもの（今は関数）を記載。>
-        settings: [
-            require:   Or(InRange(divisor, -9223372036854775808, -1), InRange(divisor, 1, 9223372036854775807))
-            require:   InRange(dividend, -9223372036854775808, 9223372036854775807)
-            ensure:    result_is_finite
-            ensure:    result_within_i64_range
-            invariant: no_memory_aliasing
-            forbid:    RuntimeNullCheck
-            forbid:    UnprovenUnwrap
-        ]
-    }
+  // ── 自然言語 goal + 型 + examples ─────────────────────
+  define: {
+    id:    safe_divide_v1
+    goal: "2つの整数を安全に割り算する。ゼロ除算は物理的に不可能にすること"
+    inputs: dividend: i64, divisor: i64
+    output: Result<i64, String>
+    examples: [
+      - "正常割り算": (10, 2)  => Ok(5)
+      - "割り切れない": (7, 3) => Ok(2)
+      - "ゼロ除算":    (7, 0)  => Err("division by zero")
+      - "負の割り算":  (-6, 3) => Ok(-2)
+    ]
+  }
+
+  // ── intent + 明示的な制約 + examples ──────────────────
+  define: {
+    id:    bound_check_v1
+    intent: """
+      ゼロ除算を物理的に排除し、システムの停止を防ぐ。
+      0 〜 10 の範囲外の値は None として安全に無視する。
+    """
+    goal: brace_demo_goal "境界内の整数 n を安全に扱う"
+    inputs: n: i32
+    output: Option<i32>
+    examples: [
+      - (0)   => Some(0)
+      - (5)   => Some(5)
+      - (10)  => Some(10)
+      - (-1)  => None
+      - (11)  => None
+    ]
+    settings: [
+      require: InRange(n, 0, 10)
+      ensure: n_ok
+      forbid: UnprovenUnwrap
+    ]
+  }
 }
 ```
+
+### `define` ブロックのフィールド一覧
+
+| フィールド | 必須 | 説明 |
+|-----------|------|------|
+| `id` | — | 条文の一意識別子。将来の依存関係グラフのノードキー（例: `safe_divide_v1`） |
+| `intent` | — | 設計意図を `"""..."""` トリプルクォートで複数行記述。AI プロンプトに使われる |
+| `goal` | **必須** | 関数名または自然言語。`goal: name`、`goal: name "説明"`、`goal: "自然言語のみ"` の 3 形式 |
+| `inputs` | — | 入力パラメータの型宣言（例: `inputs: dividend: i64, divisor: i64`）。コード生成のシグネチャに反映 |
+| `output` | — | 返り値の型（例: `output: Result<i64, String>`）。コード生成の戻り値に反映 |
+| `examples` | — | 具体的な入出力例（`[...]` ブロック）。テストコード自動生成に使われる |
+| `context` | — | 設計の背景・箇条書き（従来機能） |
+| `settings` | — | 述語制約ブロック（`require` / `ensure` / `invariant` / `forbid`） |
+
+> **Note:** `goal: "自然言語のみ"` の形式では `settings:` を省略でき、AI が制約を自動生成する。
+
+### `goal` の 3 つの記法
+
+```hb
+// 1. 識別子のみ（従来互換）
+goal: safe_division
+
+// 2. 識別子 + 自然言語ラベル
+goal: safe_division "ゼロ除算を防ぐ安全な除算"
+
+// 3. 自然言語のみ（識別子は自動生成、AI が settings を推論）
+goal: "2つの整数を安全に割り算する"
+```
+
+### `intent` — 複数行の設計意図
+
+```hb
+intent: """
+  ゼロ除算を物理的に排除し、システムの停止を防ぐ。
+  0 〜 10 の範囲外の値は None として安全に無視する。
+"""
+```
+
+トリプルクォート `"""` で囲まれた複数行テキスト。AI エージェントへのプロンプトに含まれ、コード生成の文脈を強化する。
+
+### `examples` — 入出力例とテスト自動生成
+
+```hb
+examples: [
+  - "正常割り算": (10, 2)  => Ok(5)
+  - "ゼロ除算":   (7, 0)   => Err("division by zero")
+  - (5)  => Some(5)
+  - (-1) => None
+]
+```
+
+各行は `- [ラベル:] (入力) => 出力` の形式。ラベルは省略可。  
+`hb gen` 実行時に、言語に応じたテストコード（Rust: `#[test]`、Python: pytest、Go: `testing.T`、Java: JUnit、JS/TS: Jest）を自動生成する。
 
 ### 述語一覧
 
@@ -200,6 +272,10 @@ Hammurabi 専用の DSL。`ContractualGoal`（関数の論理仕様）を宣言�
 | `NonNull(x)` | 変数 `x` が null でないこと |
 | `InRange(x, min, max)` | 変数 `x` が `[min, max]` の範囲内にあること |
 | `Or(p1, p2)` | 述語 `p1` または `p2` が成立すること |
+| `Not(p)` | 述語 `p` の否定 |
+| `And(p1, p2)` | 述語 `p1` かつ `p2` が成立すること |
+| `Equals(a, b)` | `a` と `b` が等しいこと |
+| `When(cond, cons)` | `cond` ならば `cons`（含意） |
 | `<atom>` | 任意のアトム述語（意味は Verifier が解釈） |
 
 ### 禁止パターン（`forbid`）
@@ -210,6 +286,7 @@ Hammurabi 専用の DSL。`ContractualGoal`（関数の論理仕様）を宣言�
 | `UnprovenUnwrap` | 証明なき `unwrap()` / `!` を禁止 |
 | `NonExhaustiveBranch` | 非網羅的な分岐を禁止 |
 | `CatchAllSuppression` | `_ =>` / catch-all による抑制を禁止 |
+| `ImplicitCoercion` | 暗黙の型強制を禁止 |
 
 ---
 
@@ -247,19 +324,22 @@ hammurabi/
 #### `hb gen` — `.hb` ファイルからコード生成
 
 ```
-[.hb ファイル]  goal ブロックを記述
+[.hb ファイル]  define ブロック（id / intent / goal / inputs / output / examples / settings）
     │
     ▼
 [LSP パーサー]  parse_hb() — .hb テキスト → Vec<ContractualGoal>
+    │  goal: "自然言語" のみの場合は AI が settings を自動推論
     │  構文エラー → 警告 / エラーを表示して終了
     ▼
 [Verifier]  `--verifier z3` のときのみ Z3 で仕様を証明（失敗時は生成中止）
     │  既定の mock では gen はここで検証しない（`hb check` で常に検証可）
     ▼
 [CodeWriter]  ContractualGoal → 各言語のコードスケルトン
+    │          inputs/output → 関数シグネチャに反映
+    │          examples → 言語別テストコード自動生成
     │          agent が mock 以外の場合は AI が実装コードを生成
     ▼
-[出力]  Rust / Python / Go / Java / JavaScript / TypeScript
+[出力]  Rust / Python / Go / Java / JavaScript / TypeScript + テストコード
 ```
 
 #### `hb ai` — 自然言語から AI ゴール生成
@@ -286,9 +366,12 @@ hammurabi/
 関数の「何をすべきか」を命令形なしで記述する。
 
 ```rust
-use hammurabi::lang::goal::{ContractualGoal, ForbiddenPattern, Predicate};
+use hammurabi::lang::goal::{ContractualGoal, ForbiddenPattern, Predicate, Param, Example};
 
 let goal = ContractualGoal::new("safe_division")
+    .with_input("dividend", "i64")
+    .with_input("divisor", "i64")
+    .with_output("Result<i64, String>")
     .require(Predicate::or(
         Predicate::in_range("divisor", i64::MIN, -1),
         Predicate::in_range("divisor",  1, i64::MAX),
@@ -296,10 +379,33 @@ let goal = ContractualGoal::new("safe_division")
     .ensure(Predicate::atom("result_is_finite"))
     .invariant(Predicate::atom("no_memory_aliasing"))
     .forbid(ForbiddenPattern::RuntimeNullCheck);
+
+// id で一意識別（将来の依存グラフに使用）
+goal.id = Some("safe_divide_v1".into());
+
+// examples でテストコード自動生成
+goal.examples.push(Example::new(
+    Some("正常割り算".into()), "10, 2", "Ok(5)",
+));
 ```
 
 `if divisor == 0 { return Err(...) }` — こういうコードは **書かせない**。  
 正しい除数の性質を型の段階で証明させる。
+
+#### `ContractualGoal` の主要フィールド
+
+| フィールド | 型 | 説明 |
+|-----------|------|------|
+| `name` | `String` | 関数名（識別子） |
+| `id` | `Option<String>` | 一意識別子。依存グラフのノードキー |
+| `inputs` | `Vec<Param>` | 型付き入力パラメータ（`name: type`） |
+| `output` | `Option<String>` | 返り値の型文字列 |
+| `examples` | `Vec<Example>` | 入出力例。テストコード自動生成に使用 |
+| `preconditions` | `Vec<Predicate>` | 事前条件（`require`） |
+| `postconditions` | `Vec<Predicate>` | 事後条件（`ensure`） |
+| `invariants` | `Vec<Predicate>` | 不変条件（`invariant`） |
+| `forbidden` | `Vec<ForbiddenPattern>` | 禁止パターン（`forbid`） |
+| `model_pin` | `Option<String>` | AI モデルバージョン固定（再現性の基盤） |
 
 ---
 
@@ -422,6 +528,12 @@ cargo build --bin hammurabi_lsp
 | ✅ | `hb` CLI — サブコマンド構造（`gen` / `ai` / `init` / `check`） |
 | ✅ | LSP サーバー — `.hb` ファイルの補完・診断・ホバー |
 | ✅ | WASM ターゲットでのブラウザ実行（`wasm` feature） |
+| ✅ | `goal:` 自然言語対応 — `goal: "自然言語"` で AI が制約を自動推論 |
+| ✅ | `inputs:` / `output:` — 型付きパラメータ・返り値宣言（コード生成シグネチャ反映） |
+| ✅ | `examples:` — 入出力例と言語別テストコード自動生成（6言語対応） |
+| ✅ | `intent:` — トリプルクォート複数行プロンプト（AI コンテキスト強化） |
+| ✅ | `id:` — 条文の一意識別子（将来の依存グラフの基盤） |
+| ⏳ | 条文間の依存関係グラフ（`id` ベースの `depends_on`） |
 | ⏳ | VS Code 拡張の公開 |
 | ⏳ | `ForAll` / `Exists` 量化述語の Z3 エンコード実装 |
 | ⏳ | 正規表現制約など新しい `Constraint` タイプ |
