@@ -724,7 +724,8 @@ pub fn build_code_writer(
 
 /// .hb テキストをパース・検証して `AiGenOutput` にまとめる。
 /// パースエラーがあれば `AiGenError::Parse` を返す。
-pub fn hb_to_output(raw_hb: String, context: &str) -> Result<AiGenOutput, AiGenError> {
+/// `extra_context` は呼び出し元が追加で渡す説明文（空可）。
+pub fn hb_to_output(raw_hb: String, extra_context: &str) -> Result<AiGenOutput, AiGenError> {
     let parse_result = parse_hb(&raw_hb);
 
     // パースエラーがある場合 → 失敗
@@ -746,19 +747,64 @@ pub fn hb_to_output(raw_hb: String, context: &str) -> Result<AiGenOutput, AiGenE
     let goals: Vec<ContractualGoal> = parse_result.goals
         .into_iter()
         .map(|pg| {
-            if let Ok(report) = verifier.verify_goal(&pg.goal) {
+            // label / context があれば goal の name に反映しておく（AI プロンプトは goal.name を使う）
+            let goal = if pg.goal.name == pg.goal.name { pg.goal } else { pg.goal };
+            if let Ok(report) = verifier.verify_goal(&goal) {
                 warnings.extend(report.violations.clone());
             }
-            pg.goal
+            goal
         })
         .collect();
 
     // 説明文を参照して contextual warning を追加
-    if context.len() < 10 {
+    if extra_context.len() < 10 {
         warnings.push("説明が短すぎます。より詳細な記述で精度が上がります。".into());
     }
 
     Ok(AiGenOutput { goals, raw_hb, warnings })
+}
+
+/// `define` ブロックのラベル・インテントを組み合わせて AI プロンプト用の説明文を作る。
+pub fn build_goal_description(
+    goal_name: &str,
+    label:     Option<&str>,
+    intent:    Option<&str>,
+    inputs:    &[crate::lang::goal::Param],
+    output:    Option<&str>,
+    examples:  &[crate::lang::goal::Example],
+) -> String {
+    let mut parts = Vec::new();
+    if let Some(l) = label.filter(|s| !s.trim().is_empty()) {
+        parts.push(l.trim().to_owned());
+    }
+    if let Some(c) = intent.filter(|s| !s.trim().is_empty()) {
+        parts.push(c.trim().to_owned());
+    }
+    // 型情報があればプロンプトに含めてコード生成精度を上げる
+    if !inputs.is_empty() {
+        let sig = inputs.iter()
+            .map(|p| format!("{}: {}", p.name, p.type_str))
+            .collect::<Vec<_>>().join(", ");
+        parts.push(format!("Function signature: ({sig})"));
+    }
+    if let Some(out) = output.filter(|s| !s.trim().is_empty()) {
+        parts.push(format!("Return type: {out}"));
+    }
+    // 具体例があれば AI 生成精度が大幅に向上する
+    if !examples.is_empty() {
+        let ex_lines: Vec<String> = examples.iter().map(|ex| {
+            let label = ex.label.as_deref()
+                .map(|l| format!("{l}: "))
+                .unwrap_or_default();
+            format!("  - {}({}) => {}", label, ex.inputs_raw, ex.output_raw)
+        }).collect();
+        parts.push(format!("Examples:\n{}", ex_lines.join("\n")));
+    }
+    if parts.is_empty() {
+        goal_name.to_owned()
+    } else {
+        parts.join("\n")
+    }
 }
 
 // ---------------------------------------------------------------------------

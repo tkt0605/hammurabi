@@ -80,13 +80,22 @@ pub struct ParsedItem {
 // ParsedGoal — パース済み 1 ゴール
 // ---------------------------------------------------------------------------
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ParsedGoal {
     pub goal:      ContractualGoal,
     pub name_span: Span,
     pub items:     Vec<ParsedItem>,
-    /// `define: { context: ... }` で与えた設計意図・査定用の文脈（行ベース goal では常に `None`）
-    pub context:   Option<String>,
+    /// `define: { intent: """...""" }` で与えた設計意図（行ベース goal では常に `None`）
+    pub intent:    Option<String>,
+    /// `goal:` に指定した自然言語ラベル（`goal: name "日本語ラベル"` または `goal: "ラベルのみ"` で設定）
+    pub label:     Option<String>,
+    /// `goal: "自然言語"` のみで `settings:` が省略されている場合 `true`。
+    /// `hb gen` 実行時に AI が自動的に制約（require/ensure）を生成する。
+    pub needs_ai:  bool,
+    /// `id:` で指定した一意識別子（依存グラフのノードキー）
+    pub id:        Option<String>,
+    /// `model:` で指定した AI モデルバージョン固定（再現性の基盤）
+    pub model_pin: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -251,39 +260,175 @@ fn parse_hb_line_based(text: &str) -> ParseResult {
             }
 
             "model" => {
-                // モデル名指定: `model gpt-4o`
-                let val = rest.split_whitespace().next().unwrap_or(rest);
-                if val.is_empty() {
-                    errors.push(ParseError {
-                        span:     Span::whole_line(line_no, trimmed.len() as u32),
-                        message:  "model の後にモデル名が必要です（例: `model gpt-4o`）".into(),
-                        severity: ErrorSeverity::Error,
-                    });
+                // goal 定義中なら goal レベルの model PIN、それ以外はファイルレベル設定
+                if let Some(ref mut entry) = current {
+                    let model_val = rest.trim().to_owned();
+                    if model_val.is_empty() {
+                        errors.push(ParseError {
+                            span:     Span::whole_line(line_no, trimmed.len() as u32),
+                            message:  "`model:` の後にモデル名が必要です（例: `model: gpt-4o@2024-05-13`）".into(),
+                            severity: ErrorSeverity::Error,
+                        });
+                    } else {
+                        entry.model_pin = Some(model_val.clone());
+                        entry.goal.model_pin = Some(model_val);
+                    }
                 } else {
-                    file_model = Some(val.to_owned());
+                    // ファイルレベルのモデル指定: `model gpt-4o`
+                    let val = rest.split_whitespace().next().unwrap_or(rest);
+                    if val.is_empty() {
+                        errors.push(ParseError {
+                            span:     Span::whole_line(line_no, trimmed.len() as u32),
+                            message:  "model の後にモデル名が必要です（例: `model gpt-4o`）".into(),
+                            severity: ErrorSeverity::Error,
+                        });
+                    } else {
+                        file_model = Some(val.to_owned());
+                    }
                 }
             }
 
             "goal" => {
-                // 前のゴールを確定
-                if let Some(g) = current.take() { goals.push(g); }
+                // 前のゴールを確定（items が空 + label あり → needs_ai）
+                if let Some(mut g) = current.take() {
+                    if g.items.is_empty() && g.label.is_some() {
+                        g.needs_ai = true;
+                    }
+                    goals.push(g);
+                }
 
                 if rest.is_empty() {
                     errors.push(ParseError {
                         span:     Span::whole_line(line_no, trimmed.len() as u32),
-                        message:  "`goal` の後に関数名が必要です（例: `goal safe_division`）".into(),
+                        message:  "`goal` の後に関数名が必要です（例: `goal safe_division` または `goal \"自然言語の説明\"`）".into(),
                         severity: ErrorSeverity::Error,
                     });
                 } else {
-                    let name = rest.split_whitespace().next().unwrap_or(rest);
-                    let col   = col_of(raw_line, name);
-                    current = Some(ParsedGoal {
-                        goal:      ContractualGoal::new(name),
-                        name_span: Span::new(line_no, col, col + name.len() as u32),
-                        items:     Vec::new(),
-                        context:   None,
-                    });
+                    match parse_goal_rhs(rest) {
+                        Ok((name, label)) => {
+                            let col = col_of(raw_line, &name);
+                            current = Some(ParsedGoal {
+                                goal:      ContractualGoal::new(&name),
+                                name_span: Span::new(line_no, col, col + name.len() as u32),
+                                items:     Vec::new(),
+                                intent:    None,
+                                needs_ai:  false, // 後続の require/ensure がなければ確定時に true にセット
+                                label,
+                                id:        None,
+                                model_pin: None,
+                            });
+                        }
+                        Err(msg) => {
+                            errors.push(ParseError {
+                                span:     Span::whole_line(line_no, trimmed.len() as u32),
+                                message:  msg,
+                                severity: ErrorSeverity::Error,
+                            });
+                        }
+                    }
                 }
+            }
+
+            "examples" => {
+                let Some(ref mut entry) = current else {
+                    errors.push(ParseError {
+                        span:     Span::whole_line(line_no, keyword.len() as u32),
+                        message:  "`examples:` の前に `goal <name>` が必要です".into(),
+                        severity: ErrorSeverity::Error,
+                    });
+                    continue;
+                };
+                // 単行形式: `examples: (10, 2) => Ok(5), (7, 0) => Err("x")`
+                // （`[` で始まる場合は `]` まで続く多行形式を後続行で読む予定だが、
+                //  行ベースパーサでは単行のみサポート）
+                let raw = rest.trim().trim_start_matches('[').trim_end_matches(']');
+                if raw.is_empty() {
+                    // `examples: []` or `examples:` — 空、無視
+                } else {
+                    // カンマ区切りで複数 example を処理
+                    let items: Vec<(u32, String)> = split_top_level_comma(raw)
+                        .into_iter()
+                        .map(|s| (line_no, s.trim().to_owned()))
+                        .collect();
+                    match parse_examples(&items) {
+                        Ok(exs) => entry.goal.examples.extend(exs),
+                        Err(msg) => errors.push(ParseError {
+                            span:     Span::whole_line(line_no, trimmed.len() as u32),
+                            message:  msg,
+                            severity: ErrorSeverity::Error,
+                        }),
+                    }
+                }
+            }
+
+            "inputs" => {
+                let Some(ref mut entry) = current else {
+                    errors.push(ParseError {
+                        span:     Span::whole_line(line_no, keyword.len() as u32),
+                        message:  "`inputs:` の前に `goal <name>` が必要です".into(),
+                        severity: ErrorSeverity::Error,
+                    });
+                    continue;
+                };
+                if rest.is_empty() {
+                    errors.push(ParseError {
+                        span:     Span::whole_line(line_no, trimmed.len() as u32),
+                        message:  "`inputs:` の後にパラメータが必要です（例: `inputs: n: i32, m: i32`）".into(),
+                        severity: ErrorSeverity::Error,
+                    });
+                    continue;
+                }
+                match parse_inputs(rest) {
+                    Ok(params) => entry.goal.inputs = params,
+                    Err(msg)   => errors.push(ParseError {
+                        span:     Span::whole_line(line_no, trimmed.len() as u32),
+                        message:  msg,
+                        severity: ErrorSeverity::Error,
+                    }),
+                }
+            }
+
+            "output" => {
+                let Some(ref mut entry) = current else {
+                    errors.push(ParseError {
+                        span:     Span::whole_line(line_no, keyword.len() as u32),
+                        message:  "`output:` の前に `goal <name>` が必要です".into(),
+                        severity: ErrorSeverity::Error,
+                    });
+                    continue;
+                };
+                let type_str = rest.trim();
+                if type_str.is_empty() {
+                    errors.push(ParseError {
+                        span:     Span::whole_line(line_no, trimmed.len() as u32),
+                        message:  "`output:` の後に型が必要です（例: `output: Option<i32>`）".into(),
+                        severity: ErrorSeverity::Error,
+                    });
+                    continue;
+                }
+                entry.goal.output = Some(type_str.to_owned());
+            }
+
+            "id" => {
+                let Some(ref mut entry) = current else {
+                    errors.push(ParseError {
+                        span:     Span::whole_line(line_no, keyword.len() as u32),
+                        message:  "`id:` の前に `goal <name>` が必要です".into(),
+                        severity: ErrorSeverity::Error,
+                    });
+                    continue;
+                };
+                let id_val = rest.trim();
+                if id_val.is_empty() || id_val.contains(char::is_whitespace) {
+                    errors.push(ParseError {
+                        span:     Span::whole_line(line_no, trimmed.len() as u32),
+                        message:  "`id:` はスペースを含まない識別子にしてください（例: `id: safe_divide_v1`）".into(),
+                        severity: ErrorSeverity::Error,
+                    });
+                    continue;
+                }
+                entry.id = Some(id_val.to_owned());
+                entry.goal.id = Some(id_val.to_owned());
             }
 
             kw @ ("require" | "ensure" | "invariant" | "forbid") => {
@@ -375,7 +520,7 @@ fn parse_hb_line_based(text: &str) -> ParseResult {
                     message: format!(
                         "不明なキーワード: `{keyword}`\n\
                          ファイル設定: `agent`, `api_key`, `model`, `lang`\n\
-                         ゴール定義: `goal`, `require`, `ensure`, `invariant`, `forbid`"
+                         ゴール定義: `goal`, `id`, `model`, `inputs`, `output`, `examples`, `require`, `ensure`, `invariant`, `forbid`"
                     ),
                     severity: ErrorSeverity::Error,
                 });
@@ -383,7 +528,12 @@ fn parse_hb_line_based(text: &str) -> ParseResult {
         }
     }
 
-    if let Some(g) = current { goals.push(g); }
+    if let Some(mut g) = current {
+        if g.items.is_empty() && g.label.is_some() {
+            g.needs_ai = true;
+        }
+        goals.push(g);
+    }
     ParseResult {
         goals,
         errors,
@@ -554,6 +704,280 @@ fn col_of(line: &str, needle: &str) -> u32 {
     line.find(needle).unwrap_or(0) as u32
 }
 
+/// `goal:` の右辺を `(identifier, label)` に分解する。
+///
+/// 受け入れる形式:
+/// - `my_func`                   → ("my_func",    None)
+/// - `my_func "自然言語ラベル"`  → ("my_func",    Some("自然言語ラベル"))
+/// - `"日本語の目標説明"`         → (auto-slug,    Some("日本語の目標説明"))
+pub(crate) fn parse_goal_rhs(rhs: &str) -> Result<(String, Option<String>), String> {
+    let rhs = rhs.trim().trim_end_matches(',').trim();
+    if rhs.starts_with('"') {
+        let label = extract_quoted(rhs)?;
+        let slug = label_to_slug(&label);
+        if slug.is_empty() {
+            return Err(
+                "goal: の引用符ラベルから識別子を生成できませんでした（空文字または記号のみ）".into()
+            );
+        }
+        return Ok((slug, Some(label)));
+    }
+    let (ident_part, rest) = {
+        let mut it = rhs.splitn(2, |c: char| c.is_whitespace());
+        let a = it.next().unwrap_or("").to_owned();
+        let b = it.next().unwrap_or("").trim().to_owned();
+        (a, b)
+    };
+    let ident_part = ident_part.trim_end_matches(',').to_owned();
+    validate_identifier(&ident_part)?;
+    let label = if rest.starts_with('"') {
+        Some(extract_quoted(&rest)?)
+    } else if !rest.is_empty() {
+        return Err(format!(
+            "goal: `{ident_part}` の後に引用符 `\"` 以外のトークン `{rest}` があります"
+        ));
+    } else {
+        None
+    };
+    Ok((ident_part, label))
+}
+
+fn validate_identifier(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("`goal:` の後に名前が必要です".into());
+    }
+    if name.contains(|c: char| !(c.is_alphanumeric() || c == '_')) {
+        return Err(format!(
+            "goal 名 `{name}` に使えない文字があります（英数字と `_` のみ）。\
+             自然言語ラベルは引用符で囲んでください（例: `goal: \"ゼロ除算を防ぐ\"`）"
+        ));
+    }
+    Ok(())
+}
+
+fn extract_quoted(s: &str) -> Result<String, String> {
+    let s = s.trim();
+    let body = s.strip_prefix('"').ok_or("引用符 `\"` で始まっていません")?;
+    let mut out = String::new();
+    let mut chars = body.chars();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '"' => return Ok(out),
+            '\\' => match chars.next() {
+                Some('"')  => out.push('"'),
+                Some('n')  => out.push('\n'),
+                Some('t')  => out.push('\t'),
+                Some('\\') => out.push('\\'),
+                Some(c)    => out.push(c),
+                None => return Err("文字列の終端が `\\` で終わっています".into()),
+            },
+            c => out.push(c),
+        }
+    }
+    Err("文字列の閉じ引用符 `\"` がありません".into())
+}
+
+/// 自然言語ラベルを snake_case 識別子に変換する。
+///
+/// - ASCII 英数字はそのまま小文字化して使う。
+/// - 非 ASCII 文字（日本語など）は Unicode スカラー値を `u{XXXX}` で表す（最大 4 語まで）。
+/// - 空白・記号は単語区切り `_` として扱う。
+// ---------------------------------------------------------------------------
+// inputs: / output: パーサ
+// ---------------------------------------------------------------------------
+
+/// `a: i32, b: i32` → `Vec<Param>` に変換。
+/// 型文字列内の `<>`, `()`, `[]` を考慮してカンマで分割する。
+pub(crate) fn parse_inputs(rhs: &str) -> Result<Vec<crate::lang::goal::Param>, String> {
+    let rhs = rhs.trim();
+    if rhs.is_empty() {
+        return Err("`inputs:` の後にパラメータが必要です（例: `inputs: n: i32, m: i32`）".into());
+    }
+    let items = split_top_level_comma(rhs);
+    let mut params = Vec::new();
+    for item in items {
+        let item = item.trim();
+        if item.is_empty() { continue; }
+        // 最初の `:` でパラメータ名と型に分割（型の中に `:` が来ない前提）
+        let colon = item.find(':').ok_or_else(|| {
+            format!("`{item}` は `name: Type` 形式ではありません（例: `n: i32`）")
+        })?;
+        let name     = item[..colon].trim().to_owned();
+        let type_str = item[colon + 1..].trim().to_owned();
+        if name.is_empty() {
+            return Err(format!("`{item}`: パラメータ名が空です"));
+        }
+        if type_str.is_empty() {
+            return Err(format!("`{item}`: 型が空です（例: `{name}: i32`）"));
+        }
+        params.push(crate::lang::goal::Param::new(name, type_str));
+    }
+    if params.is_empty() {
+        return Err("`inputs:` にパラメータが 1 つもありません".into());
+    }
+    Ok(params)
+}
+
+/// `<>`, `()`, `[]` のネストを考慮してトップレベルの `,` で分割する。
+pub(crate) fn split_top_level_comma(s: &str) -> Vec<&str> {
+    let mut result = Vec::new();
+    let mut depth  = 0i32;
+    let mut start  = 0usize;
+    for (i, ch) in s.char_indices() {
+        match ch {
+            '<' | '(' | '[' => depth += 1,
+            '>' | ')' | ']' => depth -= 1,
+            ',' if depth == 0 => {
+                result.push(&s[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    result.push(&s[start..]);
+    result
+}
+
+// ---------------------------------------------------------------------------
+// examples: パーサ
+// ---------------------------------------------------------------------------
+
+/// `examples:` ブロック（`[...]` 内または単行）をパースして `Vec<Example>` を返す。
+///
+/// 受け付けるフォーマット（`-` 先頭のリスト形式）:
+/// ```text
+/// - (10, 2)                  => Ok(5)
+/// - 10, 2                    => Ok(5)
+/// - "ラベル": (10, 2)        => Ok(5)
+/// - dividend: 10, divisor: 2 => Ok(5)
+/// ```
+pub(crate) fn parse_examples(lines: &[(u32, String)]) -> Result<Vec<crate::lang::goal::Example>, String> {
+    let mut examples = Vec::new();
+    for (_, line) in lines {
+        let cleaned = line.trim();
+        // `- ` で始まる行のみ処理、空行・コメントはスキップ
+        let rest = if let Some(r) = cleaned.strip_prefix('-') {
+            r.trim()
+        } else if cleaned.is_empty() || cleaned.starts_with("//") || cleaned.starts_with('#') {
+            continue;
+        } else {
+            // `-` なしでも example 行として扱う
+            cleaned
+        };
+        if rest.is_empty() { continue; }
+        if let Some(ex) = parse_example_line(rest)? {
+            examples.push(ex);
+        }
+    }
+    Ok(examples)
+}
+
+/// `[label: ] inputs => output` を 1 行パース。
+/// `=>` が見つからない場合は `Ok(None)` を返す（無視）。
+pub(crate) fn parse_example_line(s: &str) -> Result<Option<crate::lang::goal::Example>, String> {
+    let s = s.trim();
+    if s.is_empty() { return Ok(None); }
+
+    // トップレベルの `=>` を探す
+    let arrow = find_top_level_arrow(s).ok_or_else(|| {
+        format!("example `{s}` に `=>` がありません（例: `(10, 2) => Ok(5)`）")
+    })?;
+
+    let lhs = s[..arrow].trim();
+    let rhs = s[arrow + 2..].trim();
+
+    if rhs.is_empty() {
+        return Err(format!("example `{s}` の `=>` の右辺が空です"));
+    }
+
+    // ラベルを検出: `"..."` で始まる場合
+    let (label, inputs_raw) = if lhs.starts_with('"') {
+        // `"ラベル": inputs`
+        let end_quote = lhs[1..].find('"').map(|i| i + 1);
+        if let Some(eq) = end_quote {
+            let label_str = lhs[1..eq].to_owned();
+            let after = lhs[eq + 1..].trim_start().strip_prefix(':')
+                .map(|s| s.trim())
+                .unwrap_or(lhs[eq + 1..].trim());
+            (Some(label_str), after.to_owned())
+        } else {
+            (None, lhs.to_owned())
+        }
+    } else {
+        (None, lhs.to_owned())
+    };
+
+    // 外側の括弧 `(...)` を剥がす
+    let inputs_clean = inputs_raw.trim();
+    let inputs_final = if inputs_clean.starts_with('(') && inputs_clean.ends_with(')') {
+        inputs_clean[1..inputs_clean.len() - 1].trim().to_owned()
+    } else {
+        inputs_clean.to_owned()
+    };
+
+    Ok(Some(crate::lang::goal::Example::new(label, inputs_final, rhs)))
+}
+
+/// `=>` のトップレベルインデックスを返す（`<>`, `()`, `[]`, `{}` のネストを無視）。
+fn find_top_level_arrow(s: &str) -> Option<usize> {
+    let bytes = s.as_bytes();
+    let mut depth = 0i32;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'<' | b'(' | b'[' | b'{' => depth += 1,
+            b'>' | b')' | b']' | b'}' => depth -= 1,
+            b'"' => {
+                // 文字列リテラルをスキップ
+                i += 1;
+                while i < bytes.len() && bytes[i] != b'"' {
+                    if bytes[i] == b'\\' { i += 1; }
+                    i += 1;
+                }
+            }
+            b'=' if depth == 0 && bytes.get(i + 1) == Some(&b'>') => {
+                return Some(i);
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+pub(crate) fn label_to_slug(label: &str) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut non_ascii_count = 0u32;
+
+    for ch in label.chars() {
+        if ch.is_ascii_alphanumeric() {
+            cur.push(ch.to_ascii_lowercase());
+        } else if ch.is_alphanumeric() {
+            // 非 ASCII 英数字（ひらがな・漢字等）
+            if !cur.is_empty() {
+                parts.push(cur.clone());
+                cur.clear();
+            }
+            non_ascii_count += 1;
+            if non_ascii_count <= 4 {
+                parts.push(format!("u{:04x}", ch as u32));
+            }
+        } else {
+            // 空白・記号 → 区切り
+            if !cur.is_empty() {
+                parts.push(cur.clone());
+                cur.clear();
+            }
+        }
+    }
+    if !cur.is_empty() { parts.push(cur); }
+
+    let slug = parts.join("_");
+    let slug = slug.trim_matches('_').to_owned();
+    if slug.len() > 64 { slug[..64].to_owned() } else { slug }
+}
+
 // ---------------------------------------------------------------------------
 // テスト
 // ---------------------------------------------------------------------------
@@ -661,5 +1085,45 @@ forbid UnprovenUnwrap
     fn complex_predicate_not() {
         let result = parse_hb("goal foo\nrequire Not(NonNull(x))\nensure ok\n");
         assert_eq!(result.errors.len(), 0, "{:?}", result.errors);
+    }
+
+    #[test]
+    fn parse_goal_rhs_identifier_only() {
+        let (name, label) = parse_goal_rhs("safe_division").unwrap();
+        assert_eq!(name, "safe_division");
+        assert!(label.is_none());
+    }
+
+    #[test]
+    fn parse_goal_rhs_identifier_with_label() {
+        let (name, label) = parse_goal_rhs(r#"safe_div "ゼロ除算を防ぐ""#).unwrap();
+        assert_eq!(name, "safe_div");
+        assert_eq!(label.as_deref(), Some("ゼロ除算を防ぐ"));
+    }
+
+    #[test]
+    fn parse_goal_rhs_pure_label() {
+        let (name, label) = parse_goal_rhs(r#""境界値チェックの実装""#).unwrap();
+        assert!(!name.is_empty(), "スラッグが空");
+        assert_eq!(label.as_deref(), Some("境界値チェックの実装"));
+    }
+
+    #[test]
+    fn line_based_goal_accepts_label() {
+        let src = "goal: safe_div \"ゼロ除算を防ぐ\"\nensure: n_ok\n";
+        let result = parse_hb(src);
+        assert_eq!(result.errors.len(), 0, "{:?}", result.errors);
+        assert_eq!(result.goals[0].goal.name, "safe_div");
+        assert_eq!(result.goals[0].label.as_deref(), Some("ゼロ除算を防ぐ"));
+    }
+
+    #[test]
+    fn line_based_goal_pure_quoted() {
+        let src = "goal: \"自然言語のゴール名\"\nensure: done\n";
+        let result = parse_hb(src);
+        assert_eq!(result.errors.len(), 0, "{:?}", result.errors);
+        let g = &result.goals[0];
+        assert!(!g.goal.name.is_empty());
+        assert_eq!(g.label.as_deref(), Some("自然言語のゴール名"));
     }
 }

@@ -31,7 +31,7 @@ use hammurabi::{
     compiler::verifier::{MockVerifier, Verifier, ConstitutionalReport},
     config::{AgentKind, DotenvResult, HammurabiConfig, load_dotenv},
     lang::goal::ContractualGoal,
-    lsp::{parse_hb, ErrorSeverity},
+    lsp::{parse_hb, ErrorSeverity, ParsedGoal},
 };
 
 #[cfg(feature = "z3-backend")]
@@ -424,8 +424,13 @@ fn cmd_gen(path: &str, opts: &CommonOpts) {
         .unwrap_or(result.lang);
 
     let use_ai = effective_cfg.agent != AgentKind::Mock;
+    let has_nl_goals = result.goals.iter().any(|pg| pg.needs_ai);
 
     println!("✅  {} 個の goal をパースしました", result.goals.len());
+    if has_nl_goals {
+        let nl_count = result.goals.iter().filter(|pg| pg.needs_ai).count();
+        println!("⚡  {} 個の goal は自然言語のみ（AI が制約を自動生成します）", nl_count);
+    }
     println!("🌐  出力言語: {}", lang.display_name());
     println!("🤖  エージェント: {}", effective_cfg.agent.display_name());
     if effective_cfg.agent.requires_api_key() {
@@ -446,22 +451,97 @@ fn cmd_gen(path: &str, opts: &CommonOpts) {
         println!("    ✅  全ての仕様が証明されました。コード生成を開始します。");
     }
 
-    if use_ai { println!("✨  AI が契約を満たす実装コードを生成します…"); }
+    if use_ai || has_nl_goals {
+        println!("✨  AI が契約を満たす実装コードを生成します…");
+    }
     println!();
+
+    // needs_ai ゴールがある場合は generator も初期化する
+    let generator = if has_nl_goals {
+        Some(build_generator(&effective_cfg).unwrap_or_else(|e| {
+            eprintln!("AI ジェネレーター初期化エラー: {e}"); process::exit(1);
+        }))
+    } else {
+        None
+    };
 
     let writer = build_code_writer(&effective_cfg).unwrap_or_else(|e| {
         eprintln!("コードライター初期化エラー: {e}"); process::exit(1);
     });
 
     for (i, pg) in result.goals.iter().enumerate() {
-        let goal = &pg.goal;
         println!("─────────────────────────────────────────────────");
-        println!("  Goal #{}: `{}`", i + 1, goal.name);
-        println!("─────────────────────────────────────────────────");
-        println!("  require  : {} 個 / ensure: {} 個 / forbid: {} 個\n",
-            goal.preconditions.len(), goal.postconditions.len(), goal.forbidden.len());
 
-        if use_ai { println!("⏳  `{}` を生成中…", goal.name); }
+        // needs_ai な goal は自然言語から制約を AI で生成する
+        let expanded: ContractualGoal;
+        let goal: &ContractualGoal = if pg.needs_ai {
+            let desc = pg.label.as_deref().unwrap_or(&pg.goal.name);
+            let display_name = if let Some(lbl) = &pg.label {
+                format!("`{}` (\"{}\")", pg.goal.name, lbl)
+            } else {
+                format!("`{}`", pg.goal.name)
+            };
+            println!("  Goal #{}: {} ⚡ 自然言語から AI が制約を生成", i + 1, display_name);
+            println!("─────────────────────────────────────────────────");
+            println!("  説明: {desc}");
+            println!("⏳  制約を生成中…\n");
+            // goal レベルの model: が指定されていれば専用 generator を生成してモデルを上書き
+            let goal_generator;
+            let active_generator: &dyn hammurabi::ai_gen::AiGoalGenerator = if let Some(ref mp) = pg.model_pin {
+                let mut pinned_cfg = effective_cfg.clone();
+                // `name@version` → `name-version`（OpenAI / Anthropic の API 形式に正規化）
+                let api_model = mp.replacen('@', "-", 1);
+                pinned_cfg.model = Some(api_model.clone());
+                println!("  📌  model PIN: {mp}  →  API モデル: {api_model}");
+                goal_generator = hammurabi::ai_gen::build_generator(&pinned_cfg).unwrap_or_else(|e| {
+                    eprintln!("AI ジェネレーター (PIN) 初期化エラー: {e}"); process::exit(1);
+                });
+                goal_generator.as_ref()
+            } else {
+                generator.as_ref().unwrap().as_ref()
+            };
+
+            match active_generator.generate(desc) {
+                Ok(output) => {
+                    if let Some(mut gen_goal) = output.goals.into_iter().next() {
+                        // .hb で指定された inputs/output/examples/id を AI 生成ゴールに引き継ぐ
+                        if !pg.goal.inputs.is_empty() {
+                            gen_goal.inputs = pg.goal.inputs.clone();
+                        }
+                        if pg.goal.output.is_some() {
+                            gen_goal.output = pg.goal.output.clone();
+                        }
+                        if !pg.goal.examples.is_empty() {
+                            gen_goal.examples = pg.goal.examples.clone();
+                        }
+                        gen_goal.id        = pg.id.clone();
+                        gen_goal.model_pin = pg.model_pin.clone();
+                        println!("  ✅  生成された制約: require {} / ensure {} / forbid {}\n",
+                            gen_goal.preconditions.len(),
+                            gen_goal.postconditions.len(),
+                            gen_goal.forbidden.len());
+                        expanded = gen_goal;
+                        &expanded
+                    } else {
+                        eprintln!("  ⚠️  AI が制約を生成できませんでした。スキップします。");
+                        println!();
+                        continue;
+                    }
+                }
+                Err(e) => {
+                    eprintln!("  ❌  AI 生成エラー: {e}");
+                    println!();
+                    continue;
+                }
+            }
+        } else {
+            println!("  Goal #{}: `{}`", i + 1, pg.goal.name);
+            println!("─────────────────────────────────────────────────");
+            println!("  require  : {} 個 / ensure: {} 個 / forbid: {} 個\n",
+                pg.goal.preconditions.len(), pg.goal.postconditions.len(), pg.goal.forbidden.len());
+            if use_ai { println!("⏳  `{}` を生成中…", pg.goal.name); }
+            &pg.goal
+        };
 
         match writer.write_code(goal, &lang) {
             Ok(out) => {
@@ -471,7 +551,7 @@ fn cmd_gen(path: &str, opts: &CommonOpts) {
             }
             Err(e) => {
                 eprintln!("❌  生成エラー (`{}`): {e}", goal.name);
-                if !use_ai { process::exit(1); }
+                if !use_ai && !pg.needs_ai { process::exit(1); }
                 println!("  ⚠️  スキップしました。");
             }
         }
@@ -479,8 +559,11 @@ fn cmd_gen(path: &str, opts: &CommonOpts) {
     }
 
     println!("═══════════════════════════════════════════════════");
-    if use_ai { println!("  完了！AI が生成したコードを確認してください。"); }
-    else       { println!("  完了！TODO を実装に置き換えてください。"); }
+    if use_ai || has_nl_goals {
+        println!("  完了！AI が生成したコードを確認してください。");
+    } else {
+        println!("  完了！TODO を実装に置き換えてください。");
+    }
     println!("═══════════════════════════════════════════════════");
 }
 
@@ -647,16 +730,60 @@ fn cmd_check(path: &str, verifier_kind: &VerifierKind) {
     if let Some(ref a) = result.agent  { println!("  agent   : {}", a.display_name()); }
     if let Some(ref m) = result.model  { println!("  model   : {m}"); }
 
+    // needs_ai ゴールのヒントを表示 + id / model_pin のサマリ
+    for ParsedGoal { goal, needs_ai, label, id, model_pin, .. } in &result.goals {
+        if *needs_ai {
+            let desc = label.as_deref().unwrap_or(&goal.name);
+            println!("  ⚡  `{}`: 自然言語のみ定義 — `hb gen {}` で制約を自動生成できます", goal.name, path);
+            println!("       説明: {desc}");
+        }
+        if let Some(ref id_str) = id {
+            let model_str = model_pin.as_deref().map(|m| format!("  (model: {m})")).unwrap_or_default();
+            println!("  🔖  `{}` → id: {id_str}{model_str}", goal.name);
+        }
+    }
+
+    // ID 重複検証
+    {
+        let mut seen: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+        let mut has_dup = false;
+        for pg in &result.goals {
+            if let Some(ref id_str) = pg.id {
+                if let Some(prev_name) = seen.get(id_str.as_str()) {
+                    println!("❌  ID 重複: `{id_str}` は `{prev_name}` と `{}` の両方に使われています", pg.goal.name);
+                    has_dup = true;
+                } else {
+                    seen.insert(id_str.as_str(), pg.goal.name.as_str());
+                }
+            }
+        }
+        if has_dup {
+            process::exit(1);
+        }
+    }
+
     if result.goals.is_empty() {
         if !errors.is_empty() { process::exit(1); }
         return;
     }
 
+    // needs_ai ゴールのみの場合は論理検証をスキップ
+    let verifiable_goals: Vec<_> = result.goals.iter().filter(|pg| !pg.needs_ai).collect();
+
     // ── 契約の論理検証（Verifier による証明）──────────────────────────
     println!();
     println!("── ContractualGoal 検証 ({backend_label}) ──────────────────────────");
 
-    let (ok, err) = verify_goals_with_backend(&result.goals, verifier_kind);
+    if verifiable_goals.is_empty() {
+        println!("  (全ての goal が自然言語のみです。`hb gen` で制約を自動生成してください)");
+        if !errors.is_empty() { process::exit(1); }
+        return;
+    }
+
+    let (ok, err) = verify_goals_with_backend(
+        &verifiable_goals.iter().map(|pg| (*pg).clone()).collect::<Vec<_>>(),
+        verifier_kind,
+    );
 
     println!();
     println!("  合格: {ok} 個 / 違反: {err} 個");

@@ -305,169 +305,79 @@ fn read_balanced_square_inner_lines(
     }
 }
 
-fn is_define_body_field_line(line: &str) -> bool {
-    let t = strip_line_comment(line).trim();
-    let Some((k, _)) = split_key_colon(t) else {
-        return false;
-    };
-    matches!(
-        k.to_lowercase().as_str(),
-        "goal" | "settings" | "context"
-    )
-}
-
-/// `context:` の値が「`-` で始まる行の並び」のとき。`rest` は同一行の `:` 右（空可）。
-fn parse_context_dash_list(
-    lines: &[(u32, String)],
-    idx:   usize,
-    rest:  &str,
-) -> Result<(String, usize), Vec<ParseError>> {
-    let mut bullets: Vec<String> = Vec::new();
-    let rest = rest.trim();
-    let mut i = idx + 1;
-
-    if !rest.is_empty() {
-        if !rest.starts_with('-') {
-            return Err(vec![err(
-                lines[idx].0,
-                "`context:` の箇条書きは `- 項目` で始めるか、`[` / `{` / `\"` 形式を使ってください",
-            )]);
-        }
-        bullets.push(rest.to_owned());
-    }
-
-    while i < lines.len() {
-        let (line_ln, ref line) = lines[i];
-        let t = strip_line_comment(line).trim();
-        if t.is_empty() {
-            i += 1;
-            continue;
-        }
-        if is_define_body_field_line(line) {
-            break;
-        }
-        if t.starts_with('-') {
-            bullets.push(t.to_owned());
-            i += 1;
-        } else {
-            return Err(vec![err(
-                line_ln,
-                "context の `-` リスト中に、`goal:` / `settings:` 以外の行が入っています。\
-                 並列箇条書きは各行を `-` で始めるか、`context: [ ... ]` を使ってください",
-            )]);
-        }
-    }
-
-    Ok((bullets.join("\n"), i))
-}
-
-/// `rest` = `context:` の右側全体（1 行分）。`"..."` / `{` / `[` / `-` リスト。
-fn parse_double_quoted(rest: &str, ln: u32) -> Result<(String, &str), Vec<ParseError>> {
-    let s = rest.trim();
-    let Some(body) = s.strip_prefix('"') else {
-        return Err(vec![err(ln, "内部エラー: `context:` の値が引用符で始まっていません")]);
-    };
-    let mut out = String::new();
-    let mut chars = body.chars();
-    while let Some(ch) = chars.next() {
-        match ch {
-            '"' => {
-                let tail = chars.as_str();
-                return Ok((out, tail));
-            }
-            '\\' => {
-                let Some(esc) = chars.next() else {
-                    return Err(vec![err(
-                        ln,
-                        "`context:` の文字列で `\\` の後に文字がありません",
-                    )]);
-                };
-                match esc {
-                    '"' => out.push('"'),
-                    'n' => out.push('\n'),
-                    't' => out.push('\t'),
-                    '\\' => out.push('\\'),
-                    c => out.push(c),
-                }
-            }
-            c => out.push(c),
-        }
-    }
-    Err(vec![err(
-        ln,
-        "`context:` の文字列が閉じ引用符 `\"` で終わっていません",
-    )])
-}
-
-fn join_context_inner_lines(inner_lines: Vec<(u32, String)>) -> String {
-    inner_lines
-        .into_iter()
-        .map(|(_, l)| strip_line_comment(&l).trim().to_owned())
-        .filter(|l| !l.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-/// `context:` の値。`"..."` / `{...}` / `[...]` / `context:` の次行からの `-` リスト（同一行 `context: - x` も可）。
-fn parse_context_field(
+/// `intent: """..."""` — トリプルクォート文字列パーサ。
+///
+/// 単行: `intent: """設計の意図"""`
+/// 複数行:
+/// ```text
+/// intent: """
+///   ゼロ除算を物理的に排除し、
+///   システムの停止を防ぐ
+/// """
+/// ```
+fn parse_intent_field(
     lines: &[(u32, String)],
     idx:   usize,
     rest:  &str,
     ln:    u32,
 ) -> Result<(String, usize), Vec<ParseError>> {
     let t = rest.trim();
-    if t.starts_with('[') {
-        let (inner_lines, next) = read_balanced_square_inner_lines(lines, idx, rest, ln, "context")?;
-        return Ok((join_context_inner_lines(inner_lines), next));
-    }
-    if t.starts_with('{') {
-        let (inner_lines, next) = read_balanced_brace_inner_lines(lines, idx, rest, ln, "context")?;
-        return Ok((join_context_inner_lines(inner_lines), next));
-    }
-    if t.starts_with('"') {
-        let (s, tail) = parse_double_quoted(rest, ln)?;
-        let tail = strip_line_comment(tail).trim();
-        if !tail.is_empty() && !tail.starts_with("//") {
-            return Err(vec![err(
-                ln,
-                format!("`context:` の引用符の後に不要なトークンがあります: `{tail}`"),
-            )]);
-        }
-        return Ok((s, idx + 1));
-    }
-    if t.is_empty() || t.starts_with('-') {
-        return parse_context_dash_list(lines, idx, rest);
-    }
-    Err(vec![err(
-        ln,
-        "`context:` は次のいずれかで指定してください: \
-         `\"1行\"` / `{ 複数行 }` / `[ 並列・箇条書き ]` / `context:` の次行から `- 項目` を並べる",
-    )])
-}
 
-fn validate_goal_name(name: &str, ln: u32) -> Result<(), Vec<ParseError>> {
-    if name.is_empty() || name == "<Name>" {
+    // `"""` で始まることを確認
+    if !t.starts_with("\"\"\"") {
         return Err(vec![err(
             ln,
-            "`goal:` の後に識別子が必要です（例: `goal: safe_division`）",
+            "`intent:` の値は `\"\"\"` で始まる必要があります（例: `intent: \"\"\"設計の意図\"\"\"`）",
         )]);
     }
-    if name.contains(|c: char| !(c.is_alphanumeric() || c == '_')) {
-        return Err(vec![err(
-            ln,
-            format!("goal 名に使えない文字があります: `{name}`（英数字と `_` のみ）"),
-        )]);
+
+    let after_open = &t[3..]; // `"""` の直後
+
+    // 同一行に閉じ `"""` がある場合（単行）
+    if let Some(close_pos) = after_open.find("\"\"\"") {
+        let content = after_open[..close_pos].trim().to_owned();
+        return Ok((content, idx + 1));
     }
-    Ok(())
+
+    // 複数行: 次行以降を走査して閉じ `"""` を探す
+    let mut content_lines: Vec<String> = Vec::new();
+    // 開始行の `"""` より右の残り部分
+    if !after_open.trim().is_empty() {
+        content_lines.push(after_open.to_owned());
+    }
+
+    let mut i = idx + 1;
+    while i < lines.len() {
+        let (_, ref line) = lines[i];
+        if let Some(close_pos) = line.find("\"\"\"") {
+            // 閉じ `"""` より前の内容を追加
+            let before = line[..close_pos].trim_end();
+            if !before.is_empty() {
+                content_lines.push(before.to_owned());
+            }
+            let text = content_lines.join("\n").trim().to_owned();
+            return Ok((text, i + 1));
+        }
+        content_lines.push(line.trim_end().to_owned());
+        i += 1;
+    }
+
+    Err(vec![err(ln, "`intent:` のトリプルクォート `\"\"\"` が閉じられていません")])
 }
 
 fn assemble_parsed_goal(
     name:           &str,
+    label:          Option<String>,
     name_line:      u32,
     settings_lines: Vec<(u32, String)>,
-    context:        Option<String>,
+    intent:         Option<String>,
+    needs_ai:       bool,
+    id:             Option<String>,
+    model_pin:      Option<String>,
 ) -> Result<ParsedGoal, Vec<ParseError>> {
     let mut goal = ContractualGoal::new(name);
+    goal.id        = id.clone();
+    goal.model_pin = model_pin.clone();
     let mut items: Vec<ParsedItem> = Vec::new();
 
     for (ln, sline) in settings_lines {
@@ -486,6 +396,28 @@ fn assemble_parsed_goal(
             return Err(vec![err(ln, format!("`{kw}:` の後に値が必要です"))]);
         }
         match kw.to_lowercase().as_str() {
+            "inputs" => match super::parse_inputs(rest) {
+                Ok(params) => goal.inputs = params,
+                Err(msg)   => return Err(vec![err(ln, msg)]),
+            },
+            "output" => {
+                goal.output = Some(rest.to_owned());
+            }
+            "examples" => {
+                // settings: [] 内に `examples: [...]` はサポートしないが、
+                // 単行 `examples: (10, 2) => Ok(5)` は受け付ける
+                let raw = rest.trim().trim_start_matches('[').trim_end_matches(']');
+                if !raw.is_empty() {
+                    let items: Vec<(u32, String)> = super::split_top_level_comma(raw)
+                        .into_iter()
+                        .map(|s| (ln, s.trim().to_owned()))
+                        .collect();
+                    match super::parse_examples(&items) {
+                        Ok(exs) => goal.examples.extend(exs),
+                        Err(msg) => return Err(vec![err(ln, msg)]),
+                    }
+                }
+            }
             "require" => match parse_predicate(rest) {
                 Ok(pred) => {
                     let display = pred.to_string();
@@ -541,7 +473,7 @@ fn assemble_parsed_goal(
             other => {
                 return Err(vec![err(
                     ln,
-                    format!("settings 内の不明キー `{other}` — require / ensure / invariant / forbid"),
+                    format!("settings 内の不明キー `{other}` — inputs / output / examples / require / ensure / invariant / forbid"),
                 )]);
             }
         }
@@ -552,16 +484,28 @@ fn assemble_parsed_goal(
         goal,
         name_span,
         items,
-        context,
+        intent,
+        label,
+        needs_ai,
+        id,
+        model_pin,
     })
 }
 
 fn parse_define_body(inner: &[(u32, String)]) -> Result<ParsedGoal, Vec<ParseError>> {
     let mut idx = 0usize;
     let mut goal_name: Option<String> = None;
+    let mut goal_label: Option<String> = None;
     let mut goal_ln: u32 = 0;
     let mut settings_lines: Option<Vec<(u32, String)>> = None;
-    let mut context: Option<String> = None;
+    let mut intent_text: Option<String> = None;
+    // inputs:/output:/examples: はトップレベルフィールドとして define: {} 内で指定可能
+    let mut define_inputs:   Option<Vec<crate::lang::goal::Param>> = None;
+    let mut define_output:   Option<String> = None;
+    let mut define_examples: Vec<crate::lang::goal::Example> = Vec::new();
+    // id: / model: はトップレベルのみ（settings: 内には書かない）
+    let mut define_id:        Option<String> = None;
+    let mut define_model_pin: Option<String> = None;
 
     while idx < inner.len() {
         let (ln, ref line) = inner[idx];
@@ -577,35 +521,92 @@ fn parse_define_body(inner: &[(u32, String)]) -> Result<ParsedGoal, Vec<ParseErr
             )]);
         };
         match key.to_lowercase().as_str() {
-            "context" => {
-                if context.is_some() {
-                    return Err(vec![err(ln, "`context:` は define 内で 1 度だけ指定してください")]);
+            "intent" => {
+                if intent_text.is_some() {
+                    return Err(vec![err(ln, "`intent:` は define 内で 1 度だけ指定してください")]);
                 }
-                let (text, next) = parse_context_field(inner, idx, rest, ln)?;
-                context = if text.trim().is_empty() {
-                    None
-                } else {
-                    Some(text)
-                };
+                let (text, next) = parse_intent_field(inner, idx, rest, ln)?;
+                intent_text = if text.trim().is_empty() { None } else { Some(text) };
                 idx = next;
             }
             "goal" => {
-                let name = trim_comma(rest);
-                validate_goal_name(name, ln)?;
-                goal_name = Some(name.to_owned());
-                goal_ln = ln;
+                match super::parse_goal_rhs(rest) {
+                    Ok((name, lbl)) => {
+                        goal_name = Some(name);
+                        goal_label = lbl;
+                        goal_ln = ln;
+                    }
+                    Err(msg) => return Err(vec![err(ln, msg)]),
+                }
                 idx += 1;
+            }
+            "inputs" => {
+                match super::parse_inputs(rest) {
+                    Ok(params) => define_inputs = Some(params),
+                    Err(msg)   => return Err(vec![err(ln, msg)]),
+                }
+                idx += 1;
+            }
+            "output" => {
+                define_output = Some(rest.trim().to_owned());
+                idx += 1;
+            }
+            "examples" => {
+                // `examples: [ ... ]` ブロック形式または単行
+                let rest_trim = rest.trim();
+                if rest_trim.starts_with('[') {
+                    // `[...]` ブロックを読み込む
+                    let (ex_lines, next) =
+                        read_balanced_square_inner_lines(inner, idx, rest_trim, ln, "examples")?;
+                    match super::parse_examples(&ex_lines) {
+                        Ok(exs) => define_examples.extend(exs),
+                        Err(msg) => return Err(vec![err(ln, msg)]),
+                    }
+                    idx = next;
+                } else {
+                    // 単行: `examples: (10,2) => Ok(5), (7,0) => Err("x")`
+                    let raw = rest_trim.trim_end_matches(']');
+                    if !raw.is_empty() {
+                        let items: Vec<(u32, String)> = super::split_top_level_comma(raw)
+                            .into_iter()
+                            .map(|s| (ln, s.trim().to_owned()))
+                            .collect();
+                        match super::parse_examples(&items) {
+                            Ok(exs) => define_examples.extend(exs),
+                            Err(msg) => return Err(vec![err(ln, msg)]),
+                        }
+                    }
+                    idx += 1;
+                }
             }
             "settings" => {
                 let (body, next) = parse_settings_header(inner, idx, rest, ln)?;
                 settings_lines = Some(body);
                 idx = next;
             }
+            "id" => {
+                if define_id.is_some() {
+                    return Err(vec![err(ln, "`id:` は define 内で 1 度だけ指定してください")]);
+                }
+                let id_val = rest.trim();
+                if id_val.contains(char::is_whitespace) {
+                    return Err(vec![err(ln, "`id:` はスペースを含まない識別子にしてください（例: `safe_divide_v1`）")]);
+                }
+                define_id = Some(id_val.to_owned());
+                idx += 1;
+            }
+            "model" => {
+                if define_model_pin.is_some() {
+                    return Err(vec![err(ln, "`model:` は define 内で 1 度だけ指定してください")]);
+                }
+                define_model_pin = Some(rest.trim().to_owned());
+                idx += 1;
+            }
             other => {
                 return Err(vec![err(
                     ln,
                     format!(
-                        "define 内の不明フィールド `{other}` — `context` / `goal` / `settings`"
+                        "define 内の不明フィールド `{other}` — `id` / `model` / `intent` / `goal` / `inputs` / `output` / `examples` / `settings`"
                     ),
                 )]);
             }
@@ -618,14 +619,33 @@ fn parse_define_body(inner: &[(u32, String)]) -> Result<ParsedGoal, Vec<ParseErr
             "define 内に `goal:` がありません",
         )]
     })?;
-    let settings = settings_lines.ok_or_else(|| {
-        vec![err(
-            inner.first().map(|l| l.0).unwrap_or(1),
-            "define 内に `settings:` がありません",
-        )]
-    })?;
 
-    assemble_parsed_goal(&name, goal_ln, settings, context)
+    // `goal: "自然言語"` のみで settings: を省略した場合は needs_ai = true
+    let needs_ai = settings_lines.is_none() && goal_label.is_some();
+    if settings_lines.is_none() && goal_label.is_none() {
+        return Err(vec![err(
+            inner.first().map(|l| l.0).unwrap_or(1),
+            "define 内に `settings:` がありません（`goal: \"説明\"` で省略した場合は AI が自動生成します）",
+        )]);
+    }
+    let settings = settings_lines.unwrap_or_default();
+
+    let mut pg = assemble_parsed_goal(&name, goal_label, goal_ln, settings, intent_text, needs_ai, define_id, define_model_pin)?;
+    // define: トップレベルの inputs/output/examples を適用（settings 内の指定より優先しない — 後勝ち）
+    if let Some(params) = define_inputs {
+        if pg.goal.inputs.is_empty() {
+            pg.goal.inputs = params;
+        }
+    }
+    if let Some(out) = define_output {
+        if pg.goal.output.is_none() {
+            pg.goal.output = Some(out);
+        }
+    }
+    if !define_examples.is_empty() && pg.goal.examples.is_empty() {
+        pg.goal.examples = define_examples;
+    }
+    Ok(pg)
 }
 
 /// `inner` = 外側の `{` `}` を除いた本文
@@ -643,7 +663,8 @@ fn parse_brace_inner(inner: &str, base_line: u32) -> Result<(BraceFileMeta, Vec<
     let mut idx = 0usize;
     let mut meta = BraceFileMeta::default();
     let mut out: Vec<ParsedGoal> = Vec::new();
-    let mut pending_goal: Option<(String, u32)> = None;
+    // (identifier, label, line_no)
+    let mut pending_goal: Option<(String, Option<String>, u32)> = None;
 
     while idx < lines.len() {
         let (ln, ref line) = lines[idx];
@@ -674,20 +695,21 @@ fn parse_brace_inner(inner: &str, base_line: u32) -> Result<(BraceFileMeta, Vec<
                         "連続した `goal:` です。前の goal に `settings:` を付けるか、`define: { ... }` にまとめてください",
                     )]);
                 }
-                let name = trim_comma(rest);
-                validate_goal_name(name, ln)?;
-                pending_goal = Some((name.to_owned(), ln));
+                match super::parse_goal_rhs(rest) {
+                    Ok((name, lbl)) => pending_goal = Some((name, lbl, ln)),
+                    Err(msg) => return Err(vec![err(ln, msg)]),
+                }
                 idx += 1;
             }
             "settings" => {
-                let Some((ref gname, gln)) = pending_goal else {
+                let Some((ref gname, ref glabel, gln)) = pending_goal else {
                     return Err(vec![err(
                         ln,
                         "`settings:` の前にトップレベルの `goal:` が必要です（複数 goal は `define: { ... }` を繰り返してください）",
                     )]);
                 };
                 let (body, next) = parse_settings_header(&lines, idx, rest, ln)?;
-                let pg = assemble_parsed_goal(gname, gln, body, None)?;
+                let pg = assemble_parsed_goal(gname, glabel.clone(), gln, body, None, false, None, None)?;
                 out.push(pg);
                 pending_goal = None;
                 idx = next;
@@ -703,11 +725,17 @@ fn parse_brace_inner(inner: &str, base_line: u32) -> Result<(BraceFileMeta, Vec<
         }
     }
 
-    if let Some((ref name, gln)) = pending_goal {
-        return Err(vec![err(
-            gln,
-            format!("`goal:` `{name}` に対応する `settings:` がありません"),
-        )]);
+    if let Some((ref name, ref glabel, gln)) = pending_goal {
+        if glabel.is_some() {
+            // settings: なし + label あり → needs_ai ゴールとして登録
+            let pg = assemble_parsed_goal(name, glabel.clone(), gln, vec![], None, true, None, None)?;
+            out.push(pg);
+        } else {
+            return Err(vec![err(
+                gln,
+                format!("`goal:` `{name}` に対応する `settings:` がありません（`goal: \"説明\"` で省略すると AI が自動生成します）"),
+            )]);
+        }
     }
 
     if out.is_empty() {
@@ -1210,5 +1238,43 @@ mod tests {
 "#;
         let ranges = find_outer_brace_ranges(src);
         assert!(parse_brace_block(src, ranges[0]).is_err());
+    }
+
+    #[test]
+    fn define_goal_with_quoted_label() {
+        let src = r#"
+{
+  define: {
+    goal: safe_div "ゼロ除算を防ぐ"
+    settings: [
+      ensure: n_ok
+    ]
+  }
+}
+"#;
+        let ranges = find_outer_brace_ranges(src);
+        let (_m, pgs) = parse_brace_block(src, ranges[0]).unwrap();
+        assert_eq!(pgs[0].goal.name, "safe_div");
+        assert_eq!(pgs[0].label.as_deref(), Some("ゼロ除算を防ぐ"));
+    }
+
+    #[test]
+    fn define_goal_as_pure_quoted_label() {
+        let src = r#"
+{
+  define: {
+    goal: "境界値チェックの実装"
+    settings: [
+      ensure: n_ok
+    ]
+  }
+}
+"#;
+        let ranges = find_outer_brace_ranges(src);
+        let (_m, pgs) = parse_brace_block(src, ranges[0]).unwrap();
+        let lbl = pgs[0].label.as_ref().unwrap();
+        assert_eq!(lbl, "境界値チェックの実装");
+        // auto-slug は ASCII 空文字でも空でないこと
+        assert!(!pgs[0].goal.name.is_empty());
     }
 }

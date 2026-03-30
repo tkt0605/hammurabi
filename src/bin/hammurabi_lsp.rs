@@ -267,28 +267,55 @@ fn compute_hover(text: &str, pos: Position) -> Option<Hover> {
         goal,
         name_span,
         items,
-        context,
+        intent,
+        label,
+        needs_ai,
+        id,
+        model_pin,
     } in &goals
     {
         // ゴール名をホバー → ContractualGoal のサマリを表示
         if span_contains(name_span, pos) {
+            let title = if let Some(lbl) = label.as_ref().filter(|s| !s.trim().is_empty()) {
+                let ai_badge = if *needs_ai { " ⚡ *AI 自動生成*" } else { "" };
+                format!("## ContractualGoal: `{}`{}\n\n> {}\n\n", goal.name, ai_badge, lbl)
+            } else {
+                format!("## ContractualGoal: `{}`\n\n", goal.name)
+            };
+            // id / model_pin バッジ行（設定されている場合のみ）
+            let mut meta_badges = String::new();
+            if let Some(id_str) = id.as_deref() {
+                meta_badges.push_str(&format!("🔖 **id:** `{id_str}`  "));
+            }
+            if let Some(model_str) = model_pin.as_deref() {
+                meta_badges.push_str(&format!("📌 **model PIN:** `{model_str}`  "));
+            }
+            if !meta_badges.is_empty() {
+                meta_badges.push('\n');
+            }
             let mut md = format!(
-                "## ContractualGoal: `{}`\n\n\
+                "{}{}\
                  | 種別 | 数 |\n|------|----|\n\
                  | Preconditions  | {} |\n\
                  | Postconditions | {} |\n\
                  | Invariants     | {} |\n\
                  | Forbidden      | {} |\n",
-                goal.name,
+                title,
+                meta_badges,
                 goal.preconditions.len(),
                 goal.postconditions.len(),
                 goal.invariants.len(),
                 goal.forbidden.len(),
             );
-            if let Some(ctx) = context.as_ref().filter(|s| !s.trim().is_empty()) {
-                md.push_str("\n### 設計コンテキスト（define）\n\n");
-                md.push_str(ctx);
-                md.push('\n');
+            if let Some(ctx) = intent.as_ref().filter(|s| !s.trim().is_empty()) {
+                md.push_str("\n### 設計インテント\n\n");
+                for line in ctx.lines() {
+                    let t = line.trim();
+                    if !t.is_empty() {
+                        md.push_str(t);
+                    }
+                    md.push('\n');
+                }
             }
             return Some(Hover {
                 contents: HoverContents::Markup(MarkupContent {

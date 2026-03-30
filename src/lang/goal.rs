@@ -135,11 +135,78 @@ impl fmt::Display for ForbiddenPattern {
 /// # 設計思想
 /// - `preconditions` : 呼び出し元が保証する入力の性質
 /// - `postconditions`: 実装が保証しなければならない出力の性質  
+// ---------------------------------------------------------------------------
+// Param — 関数の入力パラメータ（名前 + 型）
+// ---------------------------------------------------------------------------
+
+/// 関数シグネチャの入力パラメータ。
+/// `inputs: dividend: i32, divisor: i32` でパースされ、コード生成に使われる。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Param {
+    /// パラメータ名（例: `dividend`）
+    pub name:     String,
+    /// Rust スタイルの型文字列（例: `i32`, `Option<String>`, `Vec<u8>`）
+    pub type_str: String,
+}
+
+impl Param {
+    pub fn new(name: impl Into<String>, type_str: impl Into<String>) -> Self {
+        Self { name: name.into(), type_str: type_str.into() }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Example — 具体的な入出力例
+// ---------------------------------------------------------------------------
+
+/// `examples:` フィールドに書く具体的な入出力ペア。
+///
+/// ```text
+/// examples: [
+///   - (10, 2)   => Ok(5)          // 正常割り算
+///   - (7, 0)    => Err("ゼロ除算")
+///   - "負の値": (-6, 3) => Ok(-2)  // 任意のラベル付き
+/// ]
+/// ```
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Example {
+    /// 任意のラベル（`"正常割り算":` の形式）
+    pub label:      Option<String>,
+    /// 入力引数部分の生文字列（例: `10, 2` / `dividend: 10, divisor: 2` / `10`）
+    pub inputs_raw: String,
+    /// 期待される出力の生文字列（例: `Ok(5)` / `5` / `Err("ゼロ除算")`）
+    pub output_raw: String,
+}
+
+impl Example {
+    pub fn new(
+        label:      Option<String>,
+        inputs_raw: impl Into<String>,
+        output_raw: impl Into<String>,
+    ) -> Self {
+        Self { label, inputs_raw: inputs_raw.into(), output_raw: output_raw.into() }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ContractualGoal
+// ---------------------------------------------------------------------------
+
 /// - `invariants`    : 実行中ずっと成立しなければならない不変条件
 /// - `forbidden`     : AIが生成したコードに含んではならないパターン
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContractualGoal {
     pub name:           String,
+    /// goal の一意識別子（依存グラフのノードキー）。`id: safe_divide_v1` で指定。
+    pub id:             Option<String>,
+    /// AI モデルバージョン固定（再現性の基盤）。`model: gpt-4o@2024-05-13` で指定。
+    pub model_pin:      Option<String>,
+    /// 関数の入力パラメータ。指定された場合はコード生成のシグネチャに使われる。
+    pub inputs:         Vec<Param>,
+    /// 関数の返り値型（Rust スタイル）。指定された場合はコード生成の戻り値に使われる。
+    pub output:         Option<String>,
+    /// 具体的な入出力例。テストコード生成と AI プロンプトに使われる。
+    pub examples:       Vec<Example>,
     pub preconditions:  Vec<Predicate>,
     pub postconditions: Vec<Predicate>,
     pub invariants:     Vec<Predicate>,
@@ -150,6 +217,11 @@ impl ContractualGoal {
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name:           name.into(),
+            id:             None,
+            model_pin:      None,
+            inputs:         Vec::new(),
+            output:         None,
+            examples:       Vec::new(),
             preconditions:  Vec::new(),
             postconditions: Vec::new(),
             invariants:     Vec::new(),
@@ -160,6 +232,18 @@ impl ContractualGoal {
                 ForbiddenPattern::CatchAllSuppression,
             ],
         }
+    }
+
+    /// 入力パラメータを追加するビルダーメソッド
+    pub fn with_input(mut self, name: impl Into<String>, type_str: impl Into<String>) -> Self {
+        self.inputs.push(Param::new(name, type_str));
+        self
+    }
+
+    /// 返り値型を設定するビルダーメソッド
+    pub fn with_output(mut self, type_str: impl Into<String>) -> Self {
+        self.output = Some(type_str.into());
+        self
     }
 
     pub fn require(mut self, pre: Predicate) -> Self {
@@ -193,6 +277,28 @@ impl ContractualGoal {
 impl fmt::Display for ContractualGoal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "ContractualGoal: {}", self.name)?;
+        if let Some(ref id) = self.id {
+            writeln!(f, "  id        : {id}")?;
+        }
+        if let Some(ref model) = self.model_pin {
+            writeln!(f, "  model     : {model}")?;
+        }
+        if !self.inputs.is_empty() {
+            let params = self.inputs.iter()
+                .map(|p| format!("{}: {}", p.name, p.type_str))
+                .collect::<Vec<_>>().join(", ");
+            writeln!(f, "  inputs   : ({params})")?;
+        }
+        if let Some(ref out) = self.output {
+            writeln!(f, "  output   : {out}")?;
+        }
+        if !self.examples.is_empty() {
+            writeln!(f, "  examples :")?;
+            for ex in &self.examples {
+                let label = ex.label.as_deref().map(|l| format!("{l}: ")).unwrap_or_default();
+                writeln!(f, "    - {}({}) => {}", label, ex.inputs_raw, ex.output_raw)?;
+            }
+        }
         writeln!(f, "  require  : {}", self.preconditions.iter()
             .map(|p| p.to_string()).collect::<Vec<_>>().join(" ∧ "))?;
         writeln!(f, "  ensure   : {}", self.postconditions.iter()

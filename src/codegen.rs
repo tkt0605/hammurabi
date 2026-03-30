@@ -101,6 +101,169 @@ struct VarInfo {
 }
 
 // ---------------------------------------------------------------------------
+// 型変換ヘルパー — Rust スタイルの型を各言語の型に変換
+// ---------------------------------------------------------------------------
+
+/// Rust スタイルの型文字列を対象言語の型表現に変換する。
+/// ネストした `<>` や `()` を考慮して再帰的に処理する。
+pub(crate) fn translate_type(type_str: &str, lang: &TargetLang) -> String {
+    let s = type_str.trim();
+    match lang {
+        TargetLang::Rust => s.to_owned(),
+        TargetLang::Python  => rust_to_python(s),
+        TargetLang::Go      => rust_to_go(s),
+        TargetLang::Java    => rust_to_java(s),
+        TargetLang::JavaScript  => String::new(), // JS は型なし
+        TargetLang::TypeScript  => rust_to_ts(s),
+    }
+}
+
+fn rust_to_python(s: &str) -> String {
+    match s {
+        "i8"|"i16"|"i32"|"i64"|"i128"|"isize"|
+        "u8"|"u16"|"u32"|"u64"|"u128"|"usize" => "int".into(),
+        "f32"|"f64"    => "float".into(),
+        "bool"         => "bool".into(),
+        "String"|"str"|"&str" => "str".into(),
+        "()"           => "None".into(),
+        _ => {
+            if let Some(inner) = strip_generic("Option", s) {
+                format!("Optional[{}]", rust_to_python(inner))
+            } else if let Some(inner) = strip_generic("Vec", s) {
+                format!("list[{}]", rust_to_python(inner))
+            } else if let Some((k, v)) = strip_generic2("HashMap", s) {
+                format!("dict[{}, {}]", rust_to_python(k), rust_to_python(v))
+            } else if let Some((ok, err)) = strip_generic2("Result", s) {
+                // Python では例外モデル; 戻り値は Ok 型のみ
+                let _ = err;
+                rust_to_python(ok)
+            } else if let Some(inner) = strip_generic("Box", s) {
+                rust_to_python(inner)
+            } else {
+                s.to_owned()
+            }
+        }
+    }
+}
+
+fn rust_to_go(s: &str) -> String {
+    match s {
+        "i8"   => "int8".into(),  "i16"  => "int16".into(),
+        "i32"  => "int32".into(), "i64"  => "int64".into(),
+        "isize"=> "int".into(),   "i128" => "int64".into(),
+        "u8"   => "uint8".into(), "u16"  => "uint16".into(),
+        "u32"  => "uint32".into(),"u64"  => "uint64".into(),
+        "usize"=> "uint".into(),  "u128" => "uint64".into(),
+        "f32"  => "float32".into(),"f64" => "float64".into(),
+        "bool" => "bool".into(),
+        "String"|"str"|"&str" => "string".into(),
+        "()"   => "".into(),
+        _ => {
+            if let Some(inner) = strip_generic("Option", s) {
+                format!("*{}", rust_to_go(inner))
+            } else if let Some(inner) = strip_generic("Vec", s) {
+                format!("[]{}", rust_to_go(inner))
+            } else if let Some((k, v)) = strip_generic2("HashMap", s) {
+                format!("map[{}]{}", rust_to_go(k), rust_to_go(v))
+            } else if let Some((ok, _err)) = strip_generic2("Result", s) {
+                format!("({}, error)", rust_to_go(ok))
+            } else if let Some(inner) = strip_generic("Box", s) {
+                format!("*{}", rust_to_go(inner))
+            } else {
+                s.to_owned()
+            }
+        }
+    }
+}
+
+fn rust_to_java(s: &str) -> String {
+    match s {
+        "i8"   => "byte".into(),  "i16"  => "short".into(),
+        "i32"  => "int".into(),   "i64"  => "long".into(),
+        "u8"|"u16"|"u32"   => "int".into(),
+        "u64"|"i128"|"u128"=> "long".into(),
+        "usize"|"isize"    => "long".into(),
+        "f32"  => "float".into(), "f64"  => "double".into(),
+        "bool" => "boolean".into(),
+        "String"|"str"|"&str" => "String".into(),
+        "()"   => "void".into(),
+        _ => {
+            if let Some(inner) = strip_generic("Option", s) {
+                format!("Optional<{}>", rust_to_java(inner))
+            } else if let Some(inner) = strip_generic("Vec", s) {
+                format!("List<{}>", rust_to_java(inner))
+            } else if let Some((k, v)) = strip_generic2("HashMap", s) {
+                format!("Map<{}, {}>", rust_to_java(k), rust_to_java(v))
+            } else if let Some((ok, _)) = strip_generic2("Result", s) {
+                rust_to_java(ok)
+            } else if let Some(inner) = strip_generic("Box", s) {
+                rust_to_java(inner)
+            } else {
+                s.to_owned()
+            }
+        }
+    }
+}
+
+fn rust_to_ts(s: &str) -> String {
+    match s {
+        "i8"|"i16"|"i32"|"i64"|"i128"|"isize"|
+        "u8"|"u16"|"u32"|"u64"|"u128"|"usize"|
+        "f32"|"f64" => "number".into(),
+        "bool"      => "boolean".into(),
+        "String"|"str"|"&str" => "string".into(),
+        "()"        => "void".into(),
+        _ => {
+            if let Some(inner) = strip_generic("Option", s) {
+                format!("{} | null", rust_to_ts(inner))
+            } else if let Some(inner) = strip_generic("Vec", s) {
+                format!("{}[]", rust_to_ts(inner))
+            } else if let Some((k, v)) = strip_generic2("HashMap", s) {
+                format!("Record<{}, {}>", rust_to_ts(k), rust_to_ts(v))
+            } else if let Some((ok, _)) = strip_generic2("Result", s) {
+                format!("{} | Error", rust_to_ts(ok))
+            } else if let Some(inner) = strip_generic("Box", s) {
+                rust_to_ts(inner)
+            } else {
+                s.to_owned()
+            }
+        }
+    }
+}
+
+/// `Wrapper<Inner>` から `Inner` を取り出す
+fn strip_generic<'a>(wrapper: &str, s: &'a str) -> Option<&'a str> {
+    let prefix = format!("{wrapper}<");
+    if s.starts_with(prefix.as_str()) && s.ends_with('>') {
+        Some(&s[prefix.len()..s.len() - 1])
+    } else {
+        None
+    }
+}
+
+/// `Wrapper<K, V>` から `(K, V)` を取り出す（トップレベルカンマで分割）
+fn strip_generic2<'a>(wrapper: &str, s: &'a str) -> Option<(&'a str, &'a str)> {
+    let prefix = format!("{wrapper}<");
+    if !s.starts_with(prefix.as_str()) || !s.ends_with('>') {
+        return None;
+    }
+    let inner = &s[prefix.len()..s.len() - 1];
+    // トップレベルのカンマを探す
+    let mut depth = 0i32;
+    for (i, ch) in inner.char_indices() {
+        match ch {
+            '<' | '(' | '[' => depth += 1,
+            '>' | ')' | ']' => depth -= 1,
+            ',' if depth == 0 => {
+                return Some((&inner[..i], inner[i + 1..].trim_start()));
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------
 // 変数抽出ロジック
 // ---------------------------------------------------------------------------
 
@@ -233,6 +396,12 @@ impl CodeGenerator {
 
         // doc コメント
         push!(buf, "/// # Contract: `{}`\n///\n", goal.name);
+        if !goal.inputs.is_empty() {
+            let sig = goal.inputs.iter()
+                .map(|p| format!("{}: {}", p.name, p.type_str))
+                .collect::<Vec<_>>().join(", ");
+            push!(buf, "/// ## Signature\n/// `fn {fn_name}({sig})`\n///\n");
+        }
         push!(buf, "/// ## Preconditions\n");
         for pre in &goal.preconditions { push!(buf, "/// - `{pre}`\n"); }
         push!(buf, "///\n/// ## Postconditions\n");
@@ -247,12 +416,22 @@ impl CodeGenerator {
         }
         push!(buf, "///\n");
 
-        // シグネチャ
-        push!(buf, "pub fn {fn_name}<V>(\n    verifier: &V,\n");
-        for v in &vars {
-            push!(buf, "    {}: i64,\n", v.name);
+        // シグネチャ: inputs: が指定されている場合はそちらを使う
+        let ret_type = goal.output.as_deref().unwrap_or("Result<LogicRail<i64>, VerificationError>");
+        if !goal.inputs.is_empty() {
+            push!(buf, "pub fn {fn_name}(\n");
+            for p in &goal.inputs {
+                push!(buf, "    {}: {},\n", p.name, p.type_str);
+            }
+            push!(buf, ") -> {ret_type} {{\n");
+        } else {
+            // フォールバック: 述語から変数を推定
+            push!(buf, "pub fn {fn_name}<V>(\n    verifier: &V,\n");
+            for v in &vars {
+                push!(buf, "    {}: i64,\n", v.name);
+            }
+            push!(buf, ") -> {ret_type}\nwhere\n    V: Verifier,\n{{\n");
         }
-        push!(buf, ") -> Result<LogicRail<i64>, VerificationError>\nwhere\n    V: Verifier,\n{{\n");
 
         // ボディ: precondition binds
         if !vars.is_empty() {
@@ -293,6 +472,7 @@ impl CodeGenerator {
             push!(buf, "    todo!(\"Implement {fn_name}: ensure {}\")\n", ensures[0]);
         }
         push!(buf, "}}\n");
+        buf.push_str(&emit_examples(goal, &TargetLang::Rust));
         buf
     }
 
@@ -310,10 +490,21 @@ impl CodeGenerator {
         push!(buf, "# ContractualGoal: `{}`\n\n", goal.name);
         push!(buf, "from typing import Optional\n\n\n");
 
-        // docstring 形式の契約コメント
-        let params: Vec<String> = vars.iter()
-            .map(|v| format!("{}: int", v.name)).collect();
-        push!(buf, "def {}({}) -> int:\n", fn_name, params.join(", "));
+        // シグネチャ: inputs/output 指定があればそちらを、なければ変数推定
+        let params: Vec<String> = if !goal.inputs.is_empty() {
+            goal.inputs.iter()
+                .map(|p| {
+                    let py_type = translate_type(&p.type_str, &TargetLang::Python);
+                    if py_type.is_empty() { p.name.clone() }
+                    else { format!("{}: {}", p.name, py_type) }
+                }).collect()
+        } else {
+            vars.iter().map(|v| format!("{}: int", v.name)).collect()
+        };
+        let ret_type = goal.output.as_deref()
+            .map(|t| translate_type(t, &TargetLang::Python))
+            .unwrap_or_else(|| "int".into());
+        push!(buf, "def {}({}) -> {}:\n", fn_name, params.join(", "), ret_type);
         push!(buf, "    \"\"\"\n    Contract: {}\n\n", goal.name);
         push!(buf, "    Preconditions:\n");
         for pre in &goal.preconditions { push!(buf, "      - {pre}\n"); }
@@ -359,6 +550,7 @@ impl CodeGenerator {
             for e in &ensures { push!(buf, "    # ensure: {e}\n"); }
             push!(buf, "    raise NotImplementedError(\"Implement {fn_name}: ensure {}\")\n", ensures[0]);
         }
+        buf.push_str(&emit_examples(goal, &TargetLang::Python));
         buf
     }
 
@@ -389,10 +581,25 @@ impl CodeGenerator {
         push!(buf, "//\n// Forbidden: {}\n", goal.forbidden.iter()
             .map(|f| f.to_string()).collect::<Vec<_>>().join(", "));
 
-        // シグネチャ
-        let params: Vec<String> = vars.iter()
-            .map(|v| format!("{} int64", v.name)).collect();
-        push!(buf, "func {}({}) (int64, error) {{\n", fn_name, params.join(", "));
+        // シグネチャ: inputs/output 指定があればそちらを使う
+        let params: Vec<String> = if !goal.inputs.is_empty() {
+            goal.inputs.iter()
+                .map(|p| format!("{} {}", p.name, translate_type(&p.type_str, &TargetLang::Go)))
+                .collect()
+        } else {
+            vars.iter().map(|v| format!("{} int64", v.name)).collect()
+        };
+        let ret_type = goal.output.as_deref()
+            .map(|t| {
+                let go_t = translate_type(t, &TargetLang::Go);
+                if go_t.is_empty() { String::new() } else { format!("({go_t}, error)") }
+            })
+            .unwrap_or_else(|| "(int64, error)".into());
+        if ret_type.is_empty() {
+            push!(buf, "func {}({}) error {{\n", fn_name, params.join(", "));
+        } else {
+            push!(buf, "func {}({}) {} {{\n", fn_name, params.join(", "), ret_type);
+        }
 
         // 事前条件チェック
         if !vars.is_empty() {
@@ -427,6 +634,7 @@ impl CodeGenerator {
             push!(buf, "\tpanic(\"implement {fn_name}: ensure {}\")\n", ensures[0]);
         }
         push!(buf, "}}\n");
+        buf.push_str(&emit_examples(goal, &TargetLang::Go));
         buf
     }
 
@@ -461,10 +669,18 @@ impl CodeGenerator {
             .map(|f| f.to_string()).collect::<Vec<_>>().join(", "));
         push!(buf, "     */\n");
 
-        // シグネチャ
-        let params: Vec<String> = vars.iter()
-            .map(|v| format!("long {}", v.name)).collect();
-        push!(buf, "    public static long {}({}) {{\n", fn_name, params.join(", "));
+        // シグネチャ: inputs/output 指定があればそちらを使う
+        let params: Vec<String> = if !goal.inputs.is_empty() {
+            goal.inputs.iter()
+                .map(|p| format!("{} {}", translate_type(&p.type_str, &TargetLang::Java), p.name))
+                .collect()
+        } else {
+            vars.iter().map(|v| format!("long {}", v.name)).collect()
+        };
+        let ret_type = goal.output.as_deref()
+            .map(|t| translate_type(t, &TargetLang::Java))
+            .unwrap_or_else(|| "long".into());
+        push!(buf, "    public static {} {}({}) {{\n", ret_type, fn_name, params.join(", "));
 
         // 事前条件チェック
         if !vars.is_empty() {
@@ -500,6 +716,7 @@ impl CodeGenerator {
             push!(buf, "            \"Implement {fn_name}: ensure {}\");\n", ensures[0]);
         }
         push!(buf, "    }}\n}}\n");
+        buf.push_str(&emit_examples(goal, &TargetLang::Java));
         buf
     }
 
@@ -522,11 +739,20 @@ impl CodeGenerator {
         for pre in &goal.preconditions { push!(buf, " *   - {pre}\n"); }
         push!(buf, " * Postconditions:\n");
         for post in &goal.postconditions { push!(buf, " *   - {}\n", post); }
-        for v in &vars { push!(buf, " * @param {{number}} {}\n", v.name); }
-        push!(buf, " * @returns {{number}}\n */\n");
+        if !goal.inputs.is_empty() {
+            for p in &goal.inputs { push!(buf, " * @param {{{}}} {}\n", p.type_str, p.name); }
+        } else {
+            for v in &vars { push!(buf, " * @param {{number}} {}\n", v.name); }
+        }
+        push!(buf, " * @returns {{{}}}\n */\n",
+            goal.output.as_deref().unwrap_or("number"));
 
-        // シグネチャ
-        let params: Vec<String> = vars.iter().map(|v| v.name.clone()).collect();
+        // シグネチャ（JS は型なし）
+        let params: Vec<String> = if !goal.inputs.is_empty() {
+            goal.inputs.iter().map(|p| p.name.clone()).collect()
+        } else {
+            vars.iter().map(|v| v.name.clone()).collect()
+        };
         push!(buf, "function {}({}) {{\n", fn_name, params.join(", "));
 
         // 事前条件チェック
@@ -555,6 +781,7 @@ impl CodeGenerator {
             push!(buf, "  throw new Error('Implement {fn_name}: ensure {}');\n", ensures[0]);
         }
         push!(buf, "}}\n\nmodule.exports = {{ {fn_name} }};\n");
+        buf.push_str(&emit_examples(goal, &TargetLang::JavaScript));
         buf
     }
 
@@ -577,13 +804,28 @@ impl CodeGenerator {
         for pre in &goal.preconditions { push!(buf, " *   - {pre}\n"); }
         push!(buf, " * Postconditions:\n");
         for post in &goal.postconditions { push!(buf, " *   - {}\n", post); }
-        for v in &vars { let vn = &v.name; push!(buf, " * @param {vn} - satisfies constraints from ContractualGoal\n"); }
-        push!(buf, " * @returns number\n */\n");
+        if !goal.inputs.is_empty() {
+            for p in &goal.inputs {
+                let ts_type = translate_type(&p.type_str, &TargetLang::TypeScript);
+                push!(buf, " * @param {} - {}\n", p.name, ts_type);
+            }
+        } else {
+            for v in &vars { let vn = &v.name; push!(buf, " * @param {vn} - satisfies constraints from ContractualGoal\n"); }
+        }
+        let ret_ts = goal.output.as_deref()
+            .map(|t| translate_type(t, &TargetLang::TypeScript))
+            .unwrap_or_else(|| "number".into());
+        push!(buf, " * @returns {ret_ts}\n */\n");
 
         // シグネチャ（型付き）
-        let params: Vec<String> = vars.iter()
-            .map(|v| format!("{}: number", v.name)).collect();
-        push!(buf, "export function {}({}): number {{\n", fn_name, params.join(", "));
+        let params: Vec<String> = if !goal.inputs.is_empty() {
+            goal.inputs.iter()
+                .map(|p| format!("{}: {}", p.name, translate_type(&p.type_str, &TargetLang::TypeScript)))
+                .collect()
+        } else {
+            vars.iter().map(|v| format!("{}: number", v.name)).collect()
+        };
+        push!(buf, "export function {}({}): {} {{\n", fn_name, params.join(", "), ret_ts);
 
         // 事前条件チェック
         if !vars.is_empty() {
@@ -611,6 +853,7 @@ impl CodeGenerator {
             push!(buf, "  throw new Error('Implement {fn_name}: ensure {}');\n", ensures[0]);
         }
         push!(buf, "}}\n");
+        buf.push_str(&emit_examples(goal, &TargetLang::TypeScript));
         buf
     }
 }
@@ -971,6 +1214,118 @@ fn forbidden_description(fp: &ForbiddenPattern) -> &'static str {
         ForbiddenPattern::UnprovenUnwrap       => "unwrap/expect は証明なしに使用禁止",
         ForbiddenPattern::CatchAllSuppression  => "_ パターンによるロジック隠蔽を禁止",
     }
+}
+
+// ---------------------------------------------------------------------------
+// emit_examples — 言語別テストコード生成
+// ---------------------------------------------------------------------------
+
+/// examples を言語に合わせたテストコードとして出力する。
+fn emit_examples(goal: &ContractualGoal, lang: &TargetLang) -> String {
+    if goal.examples.is_empty() { return String::new(); }
+    let mut buf = String::new();
+    match lang {
+        TargetLang::Rust       => emit_examples_rust(goal, &mut buf),
+        TargetLang::Python     => emit_examples_python(goal, &mut buf),
+        TargetLang::Go         => emit_examples_go(goal, &mut buf),
+        TargetLang::Java       => emit_examples_java(goal, &mut buf),
+        TargetLang::JavaScript => emit_examples_js(goal, &mut buf),
+        TargetLang::TypeScript => emit_examples_ts(goal, &mut buf),
+    }
+    buf
+}
+
+fn emit_examples_rust(goal: &ContractualGoal, buf: &mut String) {
+    let fn_name = to_snake_case(&goal.name);
+    push!(buf, "\n#[cfg(test)]\nmod tests {{\n    use super::*;\n\n");
+    for (i, ex) in goal.examples.iter().enumerate() {
+        let test_name = if let Some(ref lbl) = ex.label {
+            format!("example_{}", to_snake_case(lbl))
+        } else {
+            format!("example_{}", i + 1)
+        };
+        push!(buf, "    #[test]\n    fn {test_name}() {{\n");
+        if let Some(ref lbl) = ex.label {
+            push!(buf, "        // {lbl}\n");
+        }
+        push!(buf, "        let result = {fn_name}({});\n", ex.inputs_raw);
+        push!(buf, "        assert_eq!(result, {});\n", ex.output_raw);
+        push!(buf, "    }}\n\n");
+    }
+    push!(buf, "}}\n");
+}
+
+fn emit_examples_python(goal: &ContractualGoal, buf: &mut String) {
+    let fn_name = to_snake_case(&goal.name);
+    push!(buf, "\n\n# ── pytest examples ─────────────────────────────────\n");
+    for (i, ex) in goal.examples.iter().enumerate() {
+        let test_name = if let Some(ref lbl) = ex.label {
+            format!("test_{}_{}", fn_name, to_snake_case(lbl))
+        } else {
+            format!("test_{}_example_{}", fn_name, i + 1)
+        };
+        push!(buf, "\ndef {test_name}():\n");
+        if let Some(ref lbl) = ex.label {
+            push!(buf, "    # {lbl}\n");
+        }
+        push!(buf, "    assert {fn_name}({}) == {}\n", ex.inputs_raw, ex.output_raw);
+    }
+}
+
+fn emit_examples_go(goal: &ContractualGoal, buf: &mut String) {
+    let fn_name = to_camel_case(&goal.name);
+    push!(buf, "\n// ── Examples (Go test) ─────────────────────────────\n");
+    push!(buf, "func Test{}Examples(t *testing.T) {{\n", to_pascal_case(&goal.name));
+    for (i, ex) in goal.examples.iter().enumerate() {
+        let default_label = format!("example {}", i + 1);
+        let label = ex.label.as_deref().unwrap_or(&default_label);
+        push!(buf, "    t.Run(\"{label}\", func(t *testing.T) {{\n");
+        push!(buf, "        got, _ := {fn_name}({})\n", ex.inputs_raw);
+        push!(buf, "        if got != {} {{ t.Errorf(\"%v != %v\", got, {}) }}\n",
+            ex.output_raw, ex.output_raw);
+        push!(buf, "    }})\n");
+    }
+    push!(buf, "}}\n");
+}
+
+fn emit_examples_java(goal: &ContractualGoal, buf: &mut String) {
+    let fn_name   = to_camel_case(&goal.name);
+    let class     = to_pascal_case(&goal.name);
+    push!(buf, "\n// ── Examples (JUnit) ───────────────────────────────\n");
+    push!(buf, "import org.junit.Test;\nimport static org.junit.Assert.*;\n\n");
+    push!(buf, "public class {class}Test {{\n");
+    for (i, ex) in goal.examples.iter().enumerate() {
+        let test_name = if let Some(ref lbl) = ex.label {
+            format!("example{}", to_pascal_case(lbl))
+        } else {
+            format!("example{}", i + 1)
+        };
+        push!(buf, "    @Test\n    public void {test_name}() {{\n");
+        if let Some(ref lbl) = ex.label { push!(buf, "        // {lbl}\n"); }
+        push!(buf, "        assertEquals({}, {fn_name}({}));\n",
+            ex.output_raw, ex.inputs_raw);
+        push!(buf, "    }}\n\n");
+    }
+    push!(buf, "}}\n");
+}
+
+fn emit_examples_js(goal: &ContractualGoal, buf: &mut String) {
+    let fn_name = to_camel_case(&goal.name);
+    push!(buf, "\n// ── Examples (Jest) ────────────────────────────────\n");
+    push!(buf, "describe('{}', () => {{\n", goal.name);
+    for (i, ex) in goal.examples.iter().enumerate() {
+        let default_label = format!("example {}", i + 1);
+        let label = ex.label.as_deref().unwrap_or(&default_label);
+        push!(buf, "  test('{}', () => {{\n", label);
+        push!(buf, "    expect({fn_name}({})).toEqual({});\n",
+            ex.inputs_raw, ex.output_raw);
+        push!(buf, "  }});\n");
+    }
+    push!(buf, "}});\n");
+}
+
+fn emit_examples_ts(goal: &ContractualGoal, buf: &mut String) {
+    emit_examples_js(goal, buf);
 }
 
 // ---------------------------------------------------------------------------
