@@ -1069,7 +1069,69 @@ mod tests {
         let line = r#"x: `ok` // comment"#;
         assert_eq!(strip_line_comment(line).trim(), "x: `ok`");
     }
+    #[test]
+    fn intent_url_in_backticks_is_not_stripped() {
+        let src = r#"
+        {
+          define: {
+            intent: """
+              `https://example.com/path` を参照する
+            """
+            goal: g
+            settings: [
+              ensure: n_ok
+            ]
+          }
+        }
+        "#;
+        let ranges = find_outer_brace_ranges(src);
+        let (_meta, pgs) = parse_brace_block(src, ranges[0]).unwrap();
+        let intent = pgs[0].intent.as_deref().unwrap();
+        assert!(intent.contains("`https://example.com/path`"));
+        assert!(intent.contains("を参照する"));
+    }
 
+    #[test]
+    fn intent_plain_url_without_backticks_is_truncated_by_line_comment_rule() {
+        let src = r#"
+        {
+          define: {
+            intent: """
+              https://example.com/path を参照する
+            """
+            goal: g
+            settings: [
+              ensure: n_ok
+            ]
+          }
+        }
+        "#;
+        let ranges = find_outer_brace_ranges(src);
+        let (_meta, pgs) = parse_brace_block(src, ranges[0]).unwrap();
+        let intent = pgs[0].intent.as_deref().unwrap();
+        assert!(intent.contains("https:"));
+        assert!(!intent.contains("//example.com/path"));
+    }
+
+    #[test]
+    fn backtick_wrapped_url_does_not_break_brace_scanning() {
+        let src = r#"
+{
+  define: {
+    intent: """
+      `https://example.com/{path}` を参照する
+    """
+    goal: g
+    settings: [
+      ensure: n_ok
+    ]
+  }
+}
+"#;
+        let ranges = find_outer_brace_ranges(src);
+        assert_eq!(ranges.len(), 1);
+        assert!(parse_brace_block(src, ranges[0]).is_ok());
+    }
     #[test]
     fn find_outer_brace_ranges_ignore_braces_inside_line_comments() {
         let src = "// 最外殻 { config, define... } 注釈\n// { goal, settings }\n{\n  config: { agent: mock }\n  define: {\n    goal: g\n    settings: [\n      ensure: n_ok\n    ]\n  }\n}\n";
@@ -1142,6 +1204,47 @@ mod tests {
         assert_eq!(pg.goal.name, "from_brace");
         assert_eq!(pg.goal.preconditions.len(), 1);
         assert_eq!(pg.goal.postconditions.len(), 1);
+    }
+
+    #[test]
+    fn config_section_unknown_key_reports_error() {
+        let src = r#"
+{
+  config: {
+    agent: mock
+    temperature: 0.7
+  }
+  define: {
+    goal: g
+    settings: [
+      ensure: n_ok
+    ]
+  }
+}
+"#;
+        let ranges = find_outer_brace_ranges(src);
+        assert!(parse_brace_block(src, ranges[0]).is_err());
+    }
+
+    #[test]
+    fn multiple_config_sections_last_one_wins_within_same_hb() {
+        let src = r#"
+{
+  config: { agent: mock, lang: rust }
+  config: { agent: openai, lang: python }
+  define: {
+    goal: g
+    settings: [
+      ensure: n_ok
+    ]
+  }
+}
+"#;
+        let ranges = find_outer_brace_ranges(src);
+        let (meta, pgs) = parse_brace_block(src, ranges[0]).unwrap();
+        assert_eq!(pgs.len(), 1);
+        assert_eq!(meta.agent, Some(AgentKind::OpenAi));
+        assert_eq!(meta.lang, Some(TargetLang::Python));
     }
 
     #[test]
@@ -1295,6 +1398,22 @@ mod tests {
     }
 
     #[test]
+    fn define_without_goal_reports_error() {
+        let src = r#"
+{
+  define: {
+    intent: """goal が欠けている"""
+    settings: [
+      ensure: n_ok
+    ]
+  }
+}
+"#;
+        let ranges = find_outer_brace_ranges(src);
+        assert!(parse_brace_block(src, ranges[0]).is_err());
+    }
+
+    #[test]
     fn define_goal_with_quoted_label() {
         let src = r#"
 {
@@ -1330,5 +1449,30 @@ mod tests {
         assert_eq!(lbl, "境界値チェックの実装");
         // auto-slug は ASCII 空文字でも空でないこと
         assert!(!pgs[0].goal.name.is_empty());
+    }
+
+    #[test]
+    fn goal_identifier_without_settings_reports_error() {
+        let src = r#"
+{
+  goal: safe_div
+}
+"#;
+        let ranges = find_outer_brace_ranges(src);
+        assert!(parse_brace_block(src, ranges[0]).is_err());
+    }
+
+    #[test]
+    fn goal_with_label_and_no_settings_becomes_ai_goal() {
+        let src = r#"
+{
+  goal: "2つの整数を安全に割り算する"
+}
+"#;
+        let ranges = find_outer_brace_ranges(src);
+        let (_m, pgs) = parse_brace_block(src, ranges[0]).unwrap();
+        assert_eq!(pgs.len(), 1);
+        assert!(pgs[0].needs_ai);
+        assert_eq!(pgs[0].label.as_deref(), Some("2つの整数を安全に割り算する"));
     }
 }

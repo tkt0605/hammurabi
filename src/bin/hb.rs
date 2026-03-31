@@ -324,6 +324,33 @@ fn print_verification_report(report: &ConstitutionalReport) {
 // 設定ロード
 // ---------------------------------------------------------------------------
 
+fn merge_gen_config(
+    mut disk_cfg: HammurabiConfig,
+    hb_cfg: &hammurabi::lsp::ParseResult,
+    opts: &CommonOpts,
+) -> HammurabiConfig {
+    // 優先順位: config.hb → .hb ファイル内 → CLI（最後に apply_overrides）
+    if let Some(a) = hb_cfg.agent.clone() {
+        disk_cfg.agent = a;
+    }
+    if let Some(k) = hb_cfg.api_key.clone() {
+        disk_cfg.api_key = Some(k);
+    }
+    if let Some(m) = hb_cfg.model.clone() {
+        disk_cfg.model = Some(m);
+    }
+    if hb_cfg.lang_specified {
+        disk_cfg.lang = hb_cfg.lang.clone();
+    }
+    disk_cfg.apply_overrides(
+        opts.agent.clone(),
+        opts.api_key.clone(),
+        opts.model.clone(),
+        opts.lang.clone(),
+    );
+    disk_cfg
+}
+
 /// `config.hb`（または `--config`）のみ。CLI オーバーライドは含まない。
 fn load_disk_config(opts: &CommonOpts) -> HammurabiConfig {
     if let Some(ref path) = opts.config {
@@ -408,26 +435,7 @@ fn cmd_gen(path: &str, opts: &CommonOpts) {
         process::exit(1);
     }
 
-    // 優先順位: config.hb → .hb ファイル内 → CLI（最後に apply_overrides）
-    let mut effective_cfg = load_disk_config(opts);
-    if let Some(a) = result.agent {
-        effective_cfg.agent = a;
-    }
-    if let Some(k) = result.api_key.clone() {
-        effective_cfg.api_key = Some(k);
-    }
-    if let Some(m) = result.model.clone() {
-        effective_cfg.model = Some(m);
-    }
-    if result.lang_specified {
-        effective_cfg.lang = result.lang;
-    }
-    effective_cfg.apply_overrides(
-        opts.agent.clone(),
-        opts.api_key.clone(),
-        opts.model.clone(),
-        opts.lang.clone(),
-    );
+    let effective_cfg = merge_gen_config(load_disk_config(opts), &result, opts);
 
     let lang = effective_cfg.lang.clone();
 
@@ -978,4 +986,112 @@ fn print_banner(subcmd: &str, cfg: &HammurabiConfig) {
         _     => {}
     }
     println!("═══════════════════════════════════════════════════\n");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hammurabi::lsp::ParseResult;
+
+    fn mk_opts() -> CommonOpts {
+        CommonOpts {
+            config: None,
+            agent: None,
+            api_key: None,
+            model: None,
+            lang: None,
+            verifier: VerifierKind::Mock,
+        }
+    }
+
+    fn mk_parse_result() -> ParseResult {
+        ParseResult {
+            goals: vec![],
+            errors: vec![],
+            lang: TargetLang::Rust,
+            lang_specified: false,
+            agent: None,
+            api_key: None,
+            model: None,
+        }
+    }
+
+    #[test]
+    fn gen_config_precedence_cli_over_hb_over_config() {
+        let disk_cfg = HammurabiConfig {
+            agent: AgentKind::Mock,
+            api_key: Some("sk-from-config".into()),
+            model: Some("config-model".into()),
+            lang: TargetLang::Rust,
+        };
+        let mut hb_cfg = mk_parse_result();
+        hb_cfg.agent = Some(AgentKind::OpenAi);
+        hb_cfg.api_key = Some("sk-from-hb".into());
+        hb_cfg.model = Some("hb-model".into());
+        hb_cfg.lang = TargetLang::Python;
+        hb_cfg.lang_specified = true;
+
+        let mut opts = mk_opts();
+        opts.agent = Some(AgentKind::Anthropic);
+        opts.api_key = Some("sk-from-cli".into());
+        opts.model = Some("cli-model".into());
+        opts.lang = Some(TargetLang::TypeScript);
+
+        let merged = merge_gen_config(disk_cfg, &hb_cfg, &opts);
+        assert_eq!(merged.agent, AgentKind::Anthropic);
+        assert_eq!(merged.api_key.as_deref(), Some("sk-from-cli"));
+        assert_eq!(merged.model.as_deref(), Some("cli-model"));
+        assert_eq!(merged.lang, TargetLang::TypeScript);
+    }
+
+    #[test]
+    fn gen_lang_from_config_is_preserved_when_hb_lang_is_unspecified() {
+        let disk_cfg = HammurabiConfig {
+            agent: AgentKind::Mock,
+            api_key: None,
+            model: None,
+            lang: TargetLang::Java,
+        };
+        let mut hb_cfg = mk_parse_result();
+        hb_cfg.lang = TargetLang::Rust; // parser default
+        hb_cfg.lang_specified = false;
+
+        let merged = merge_gen_config(disk_cfg, &hb_cfg, &mk_opts());
+        assert_eq!(merged.lang, TargetLang::Java);
+    }
+
+    #[test]
+    fn gen_hb_lang_overrides_config_when_explicit() {
+        let disk_cfg = HammurabiConfig {
+            agent: AgentKind::Mock,
+            api_key: None,
+            model: None,
+            lang: TargetLang::Rust,
+        };
+        let mut hb_cfg = mk_parse_result();
+        hb_cfg.lang = TargetLang::Python;
+        hb_cfg.lang_specified = true;
+
+        let merged = merge_gen_config(disk_cfg, &hb_cfg, &mk_opts());
+        assert_eq!(merged.lang, TargetLang::Python);
+    }
+
+    #[test]
+    fn gen_hb_agent_model_api_key_override_config() {
+        let disk_cfg = HammurabiConfig {
+            agent: AgentKind::Mock,
+            api_key: Some("sk-from-config".into()),
+            model: Some("config-model".into()),
+            lang: TargetLang::Rust,
+        };
+        let mut hb_cfg = mk_parse_result();
+        hb_cfg.agent = Some(AgentKind::OpenAi);
+        hb_cfg.api_key = Some("sk-from-hb".into());
+        hb_cfg.model = Some("hb-model".into());
+
+        let merged = merge_gen_config(disk_cfg, &hb_cfg, &mk_opts());
+        assert_eq!(merged.agent, AgentKind::OpenAi);
+        assert_eq!(merged.api_key.as_deref(), Some("sk-from-hb"));
+        assert_eq!(merged.model.as_deref(), Some("hb-model"));
+    }
 }

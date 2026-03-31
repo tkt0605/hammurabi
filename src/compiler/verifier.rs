@@ -639,6 +639,17 @@ mod tests {
     }
 
     #[test]
+    fn mock_verify_constraints_returns_mock_backend_token() {
+        let v = MockVerifier::default();
+        let token = v.verify_constraints(
+            &42_i64,
+            &[Constraint::InRange { min: 0, max: 100 }],
+        ).unwrap();
+        assert_eq!(token.backend, VerifierBackend::Mock);
+        assert!(!token.is_z3_proven());
+    }
+
+    #[test]
     fn mock_verifier_rejects_inverted_range() {
         let v = MockVerifier::default();
         let result = v.verify_constraints(
@@ -756,6 +767,29 @@ mod tests {
         assert!(matches!(status, ProofStatus::Disproven { .. }));
     }
 
+    #[test]
+    fn mock_prove_invariant_returns_unknown_for_nontrivial_predicate() {
+        let v = MockVerifier::default();
+        let status = v.prove_invariant(
+            &[Predicate::in_range("x", 0, 10)],
+            &Predicate::atom("result_is_finite"),
+        ).unwrap();
+        assert_eq!(status, ProofStatus::Unknown);
+    }
+
+    #[test]
+    fn mock_verify_constraints_accepts_predicate_without_full_logical_proof() {
+        let v = MockVerifier::default();
+        let token = v.verify_constraints(
+            &0_i64,
+            &[Constraint::Predicate(Predicate::for_all(
+                "x",
+                Predicate::in_range("x", 0, 10),
+            ))],
+        ).unwrap();
+        assert_eq!(token.backend, VerifierBackend::Mock);
+    }
+
     // -----------------------------------------------------------------------
     // Z3 量化器テスト（z3-backend feature 限定）
     // -----------------------------------------------------------------------
@@ -809,6 +843,38 @@ mod tests {
         );
         let result = v.verify_constraints(&0_i64, &[Constraint::Predicate(pred)]);
         assert!(result.is_ok(), "∃x. x>100 は充足可能なので Ok になるべき");
+    }
+
+    #[cfg(feature = "z3-backend")]
+    #[test]
+    fn z3_verify_constraints_returns_z3_backend_token() {
+        use crate::compiler::verifier::z3_backend::Z3Verifier;
+
+        let v = Z3Verifier::new();
+        let token = v.verify_constraints(
+            &42_i64,
+            &[Constraint::InRange { min: 0, max: 100 }],
+        ).unwrap();
+        assert_eq!(token.backend, VerifierBackend::Z3Smt);
+        assert!(token.is_z3_proven());
+    }
+
+    #[cfg(feature = "z3-backend")]
+    #[test]
+    fn mock_and_z3_tokens_are_distinguishable() {
+        use crate::compiler::verifier::z3_backend::Z3Verifier;
+
+        let mock = MockVerifier::default();
+        let z3 = Z3Verifier::new();
+        let constraints = [Constraint::InRange { min: 0, max: 100 }];
+
+        let mock_token = mock.verify_constraints(&42_i64, &constraints).unwrap();
+        let z3_token = z3.verify_constraints(&42_i64, &constraints).unwrap();
+
+        assert_eq!(mock_token.constraint_hash, z3_token.constraint_hash);
+        assert_eq!(mock_token.backend, VerifierBackend::Mock);
+        assert_eq!(z3_token.backend, VerifierBackend::Z3Smt);
+        assert_ne!(mock_token.backend, z3_token.backend);
     }
 
     /// ∃x. (x > 0 ∧ x < 0) は充足不可能 → Err(Unsatisfiable)

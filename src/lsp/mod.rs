@@ -826,6 +826,112 @@ mod tests {
     }
 
     #[test]
+    fn file_level_lang_sets_lang_specified_true() {
+        let src = r#"
+lang python
+{
+  define: {
+    goal: foo
+    settings: [
+      ensure: ok
+    ]
+  }
+}
+"#;
+        let result = parse_hb(src);
+        assert_eq!(result.errors.len(), 0, "{:?}", result.errors);
+        assert_eq!(result.lang, TargetLang::Python);
+        assert!(result.lang_specified);
+    }
+
+    #[test]
+    fn default_lang_does_not_set_lang_specified() {
+        let src = r#"
+{
+  define: {
+    goal: foo
+    settings: [
+      ensure: ok
+    ]
+  }
+}
+"#;
+        let result = parse_hb(src);
+        assert_eq!(result.errors.len(), 0, "{:?}", result.errors);
+        assert_eq!(result.lang, TargetLang::Rust);
+        assert!(!result.lang_specified);
+    }
+
+    #[test]
+    fn block_config_lang_sets_lang_specified_true() {
+        let src = r#"
+{
+  config: {
+    lang: python
+  }
+  define: {
+    goal: foo
+    settings: [
+      ensure: ok
+    ]
+  }
+}
+"#;
+        let result = parse_hb(src);
+        assert_eq!(result.errors.len(), 0, "{:?}", result.errors);
+        assert_eq!(result.lang, TargetLang::Python);
+        assert!(result.lang_specified);
+    }
+
+    #[test]
+    fn file_level_agent_model_api_key_are_parsed() {
+        let src = r#"
+agent openai
+model gpt-4o
+api_key sk-inline
+{
+  define: {
+    goal: foo
+    settings: [
+      ensure: ok
+    ]
+  }
+}
+"#;
+        let result = parse_hb(src);
+        assert_eq!(result.agent, Some(AgentKind::OpenAi));
+        assert_eq!(result.model.as_deref(), Some("gpt-4o"));
+        assert_eq!(result.api_key.as_deref(), Some("sk-inline"));
+        assert!(
+            result.errors.iter().any(|e| e.severity == ErrorSeverity::Warning),
+            "api_key 直書き warning が見つかりません: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn goal_outside_block_reports_error() {
+        let src = "goal foo\n";
+        let result = parse_hb(src);
+        assert!(
+            result.errors.iter().any(|e| e.message.contains("ブロック外に `goal` は書けません")),
+            "エラーが見つかりません: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn settings_outside_block_reports_error() {
+        let src = "settings [\n";
+        let result = parse_hb(src);
+        assert!(
+            result.errors.iter().any(|e| e.message.contains("ブロック外に `settings` は書けません")),
+            "エラーが見つかりません: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
     fn invalid_in_range_min_gt_max() {
         let src = "{\n  define: {\n    goal: foo\n    settings: [\n      require: InRange(x, 100, 1)\n      ensure: ok\n    ]\n  }\n}";
         let result = parse_hb(src);

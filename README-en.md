@@ -5,8 +5,8 @@
 > An AI-native language system that proves logic *before* you write code.
 > Hammurabi is not just a programming language; it's a mathematical proof for navigating uncertain times.
 
-[日本語 README](./README.md)
-
+[Japanese README](./README.md)
+[hammurabi norm](./docs/)
 [![Rust](https://img.shields.io/badge/language-Rust-orange?logo=rust)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT-blue)](./LICENSE)
 [![Build](https://img.shields.io/badge/build-passing-brightgreen)](#getting-started)
