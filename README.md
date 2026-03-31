@@ -6,7 +6,9 @@
 > 「コードを書く」前に「論理を証明する」AI ネイティブ言語システム
 
 [English README](./README-en.md)
-[Hammurabi規範](./docs/)
+[正式仕様](./docs/hb-spec.md)
+[設定仕様](.docs/config-spec.md)
+[検証モデル](.docs/verification-model.md)
 
 [![Rust](https://img.shields.io/badge/language-Rust-orange?logo=rust)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT-blue)](./LICENSE)
