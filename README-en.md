@@ -9,6 +9,7 @@
 [Official Specifications](./docs/hb-spec.md)
 [Configuration Specifications](.docs/config-spec.md)
 [Verification Model](.docs/verification-model.md)
+[IR (Intermediate Representation)](./docs/ir-design.md)
 
 [![Rust](https://img.shields.io/badge/language-Rust-orange?logo=rust)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT-blue)](./LICENSE)

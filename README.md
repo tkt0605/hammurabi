@@ -9,6 +9,7 @@
 [正式仕様](./docs/hb-spec.md)
 [設定仕様](.docs/config-spec.md)
 [検証モデル](.docs/verification-model.md)
+[IR(中間表現)](./docs/ir-design.md)
 
 [![Rust](https://img.shields.io/badge/language-Rust-orange?logo=rust)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT-blue)](./LICENSE)
